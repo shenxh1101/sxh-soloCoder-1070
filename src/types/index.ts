@@ -175,6 +175,7 @@ export interface ImportResult {
   skippedNotes: { title: string; existingId: string }[];
   overwrittenNotes: { title: string; oldId: string; newId: string }[];
   renamedNotes: { oldTitle: string; newTitle: string; noteId: string }[];
+  idMapping: Map<string, string>;
 }
 
 export interface VisitStats {

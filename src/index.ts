@@ -257,6 +257,10 @@ export class KnowledgeLibrary {
       return this.noteManager.getNoteCount();
     },
 
+    list: (): Note[] => {
+      return this.noteManager.getAllNotes();
+    },
+
     addAttachment: (noteId: string, attachment: Omit<Attachment, 'id' | 'noteId' | 'createdAt'>): Attachment | undefined => {
       const att = this.noteManager.addAttachment(noteId, attachment);
       if (att) {
@@ -492,11 +496,18 @@ export class KnowledgeLibrary {
         existingNotes
       );
 
-      for (const noteOptions of notesToCreate) {
+      const oldToNewIdMap = new Map<string, string>();
+
+      for (let i = 0; i < notesToCreate.length; i++) {
+        const noteOptions = notesToCreate[i];
         try {
           const { note } = this.notes.create(noteOptions);
           const idx = result.importedNotes.findIndex(n => n.title === noteOptions.title);
           if (idx >= 0) {
+            const oldId = result.importedNotes[idx].id;
+            if (oldId !== note.id) {
+              oldToNewIdMap.set(oldId, note.id);
+            }
             result.importedNotes[idx] = note;
             result.importedNoteIds[idx] = note.id;
           }
@@ -517,7 +528,11 @@ export class KnowledgeLibrary {
       }
 
       if (historyToRestore.length > 0 && options.keepMetadata !== false) {
-        this.historyManager.fromJSON(historyToRestore);
+        const mappedHistory = historyToRestore.map(visit => {
+          const newId = oldToNewIdMap.get(visit.noteId);
+          return newId ? { ...visit, noteId: newId } : visit;
+        });
+        this.historyManager.fromJSON(mappedHistory);
       }
 
       this.rebuildAllIndexes();

@@ -109,6 +109,13 @@ export class ImportExportManager {
         metadata.push(`summary: ${note.summary}`);
       }
       
+      if (note.metadata && Object.keys(note.metadata).length > 0) {
+        try {
+          metadata.push(`metadata: ${JSON.stringify(note.metadata)}`);
+        } catch {
+        }
+      }
+      
       lines.push('---');
       lines.push(...metadata);
       lines.push('---');
@@ -160,11 +167,13 @@ export class ImportExportManager {
       importedNoteIds: [],
       skippedNotes: [],
       overwrittenNotes: [],
-      renamedNotes: []
+      renamedNotes: [],
+      idMapping: new Map()
     };
 
     const notesToCreate: CreateNoteOptions[] = [];
     const notesToUpdate: { id: string; options: CreateNoteOptions }[] = [];
+    const usedTitles = new Set<string>();
 
     try {
       const data = JSON.parse(jsonString);
@@ -181,12 +190,16 @@ export class ImportExportManager {
             existingNotes,
             notesToCreate,
             notesToUpdate,
-            result
+            result,
+            usedTitles
           );
 
           if (processed) {
             result.importedNotes.push(processed);
             result.importedNoteIds.push(processed.id);
+            if (validatedNote.id && validatedNote.id !== processed.id) {
+              result.idMapping.set(validatedNote.id, processed.id);
+            }
             result.successCount++;
           }
         } catch (error) {
@@ -225,11 +238,13 @@ export class ImportExportManager {
       importedNoteIds: [],
       skippedNotes: [],
       overwrittenNotes: [],
-      renamedNotes: []
+      renamedNotes: [],
+      idMapping: new Map()
     };
 
     const notesToCreate: CreateNoteOptions[] = [];
     const notesToUpdate: { id: string; options: CreateNoteOptions }[] = [];
+    const usedTitles = new Set<string>();
 
     for (let i = 0; i < markdownFiles.length; i++) {
       try {
@@ -242,12 +257,16 @@ export class ImportExportManager {
           existingNotes,
           notesToCreate,
           notesToUpdate,
-          result
+          result,
+          usedTitles
         );
 
         if (processed) {
           result.importedNotes.push(processed);
           result.importedNoteIds.push(processed.id);
+          if (parsedNote.id && parsedNote.id !== processed.id) {
+            result.idMapping.set(parsedNote.id, processed.id);
+          }
           result.successCount++;
         }
       } catch (error) {
@@ -269,7 +288,8 @@ export class ImportExportManager {
     existingNotes: Note[],
     notesToCreate: CreateNoteOptions[],
     notesToUpdate: { id: string; options: CreateNoteOptions }[],
-    result: ImportResult
+    result: ImportResult,
+    usedTitles: Set<string> = new Set()
   ): Note | null {
     const conflictStrategy: ImportConflictStrategy = options.conflictStrategy || 'skip';
     const normalizedTitle = note.title.toLowerCase().trim();
@@ -295,6 +315,7 @@ export class ImportExportManager {
             oldId: existingNote.id,
             newId: note.id
           });
+          usedTitles.add(normalizedTitle);
           notesToUpdate.push({
             id: existingNote.id,
             options: this.noteToCreateOptions(note, options)
@@ -303,7 +324,8 @@ export class ImportExportManager {
 
         case 'rename':
           result.renamedCount++;
-          let newTitle = this.generateUniqueTitle(note.title, existingNotes);
+          const newTitle = this.generateUniqueTitle(note.title, existingNotes, usedTitles);
+          usedTitles.add(newTitle.toLowerCase());
           result.renamedNotes.push({
             oldTitle: note.title,
             newTitle,
@@ -315,16 +337,31 @@ export class ImportExportManager {
       }
     }
 
+    if (usedTitles.has(normalizedTitle)) {
+      result.renamedCount++;
+      const newTitle = this.generateUniqueTitle(note.title, existingNotes, usedTitles);
+      usedTitles.add(newTitle.toLowerCase());
+      result.renamedNotes.push({
+        oldTitle: note.title,
+        newTitle,
+        noteId: note.id
+      });
+      const renamedNote = { ...note, title: newTitle };
+      notesToCreate.push(this.noteToCreateOptions(renamedNote, options));
+      return renamedNote;
+    }
+
+    usedTitles.add(normalizedTitle);
     notesToCreate.push(this.noteToCreateOptions(note, options));
     return note;
   }
 
-  private generateUniqueTitle(baseTitle: string, existingNotes: Note[]): string {
+  private generateUniqueTitle(baseTitle: string, existingNotes: Note[], usedTitles: Set<string> = new Set()): string {
     const existingTitles = new Set(existingNotes.map(n => n.title.toLowerCase()));
     let counter = 1;
     let newTitle = `${baseTitle} (${counter})`;
     
-    while (existingTitles.has(newTitle.toLowerCase())) {
+    while (existingTitles.has(newTitle.toLowerCase()) || usedTitles.has(newTitle.toLowerCase())) {
       counter++;
       newTitle = `${baseTitle} (${counter})`;
     }
@@ -466,24 +503,36 @@ export class ImportExportManager {
     while (currentLine < lines.length) {
       const line = lines[currentLine];
       
-      const attachmentMatch = line.match(/^-\s*\[([^\]]+)\]\(([^)]+)\)\s*\(([^,]+),\s*([^)]+)\)/);
-      if (attachmentMatch && options.keepAttachments !== false) {
-        const [, name, path, type, sizeStr] = attachmentMatch;
-        const sizeMatch = sizeStr.match(/(\d+)/);
-        attachments.push({
-          id: generateAttachmentId(),
-          name: name.trim(),
-          path: path.trim(),
-          type: type.trim(),
-          size: sizeMatch ? parseInt(sizeMatch[1]) * 1024 : 0,
-          noteId: metadata.id || generateId(),
-          createdAt: getCurrentTimestamp()
-        });
+      if (line.trim() === '## 附件') {
         currentLine++;
+        while (currentLine < lines.length && lines[currentLine]?.trim() === '') {
+          currentLine++;
+        }
+        while (currentLine < lines.length) {
+          const attLine = lines[currentLine];
+          if (attLine.trim() === '## 相关链接' || attLine.startsWith('## ')) {
+            break;
+          }
+          const attachmentMatch = attLine.match(/^-\s*\[([^\]]+)\]\(([^)]+)\)\s*\(([^,]+),\s*([^)]+)\)/);
+          if (attachmentMatch && options.keepAttachments !== false) {
+            const [, name, path, type, sizeStr] = attachmentMatch;
+            const sizeMatch = sizeStr.match(/(\d+)/);
+            attachments.push({
+              id: generateAttachmentId(),
+              name: name.trim(),
+              path: path.trim(),
+              type: type.trim(),
+              size: sizeMatch ? parseInt(sizeMatch[1]) * 1024 : 0,
+              noteId: metadata.id || generateId(),
+              createdAt: getCurrentTimestamp()
+            });
+          }
+          currentLine++;
+        }
         continue;
       }
 
-      if (line.trim() === '## 附件' || line.trim() === '## 相关链接') {
+      if (line.trim() === '## 相关链接') {
         break;
       }
 
@@ -515,6 +564,14 @@ export class ImportExportManager {
       if (!isNaN(parsed)) lastVisitedAt = parsed;
     }
 
+    let customMetadata: Record<string, unknown> = {};
+    if (metadata.metadata && options.keepMetadata !== false) {
+      try {
+        customMetadata = JSON.parse(metadata.metadata);
+      } catch {
+      }
+    }
+
     const noteContent = contentLines.join('\n').trim();
     const outLinks = this.extractLinksFromContent(noteContent);
 
@@ -530,7 +587,7 @@ export class ImportExportManager {
       createdAt,
       updatedAt,
       lastVisitedAt,
-      metadata: options.keepMetadata !== false ? {} : {}
+      metadata: options.keepMetadata !== false ? customMetadata : {}
     };
   }
 
@@ -636,8 +693,12 @@ export class ImportExportManager {
         ...existingNotes.map(n => n.id)
       ]);
       for (const visit of backup.history) {
-        if (validNoteIds.has(visit.noteId)) {
-          historyToRestore.push({ ...visit });
+        let mappedNoteId = visit.noteId;
+        if (result.idMapping.has(visit.noteId)) {
+          mappedNoteId = result.idMapping.get(visit.noteId)!;
+        }
+        if (validNoteIds.has(mappedNoteId)) {
+          historyToRestore.push({ ...visit, noteId: mappedNoteId });
         }
       }
     }
@@ -694,6 +755,7 @@ export class ImportExportManager {
     };
 
     const conflictStrategy: ImportConflictStrategy = options.conflictStrategy || 'skip';
+    const usedTitles = new Set<string>();
 
     for (const noteData of notesData) {
       const title = noteData.title || '未命名笔记';
@@ -719,12 +781,21 @@ export class ImportExportManager {
             break;
           case 'rename':
             action = 'rename';
-            newTitle = this.generateUniqueTitle(title, existingNotes);
+            newTitle = this.generateUniqueTitle(title, existingNotes, usedTitles);
+            usedTitles.add(newTitle.toLowerCase());
             summary.toRename++;
             break;
         }
       } else {
-        summary.toCreate++;
+        if (usedTitles.has(normalizedTitle)) {
+          action = 'rename';
+          newTitle = this.generateUniqueTitle(title, existingNotes, usedTitles);
+          usedTitles.add(newTitle.toLowerCase());
+          summary.toRename++;
+        } else {
+          usedTitles.add(normalizedTitle);
+          summary.toCreate++;
+        }
       }
 
       items.push({

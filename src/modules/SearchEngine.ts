@@ -480,10 +480,15 @@ export class SearchEngine {
       options.sortBy,
       options.sortOrder,
       JSON.stringify(options.tagFilters),
+      options.tagFilterMode,
       options.isFavorite,
       options.hasAttachments,
+      JSON.stringify(options.attachmentTypes),
       options.dateFrom,
-      options.dateTo
+      options.dateTo,
+      options.dateField,
+      options.caseSensitive,
+      limit
     );
 
     const cursor: SearchCursor = {

@@ -731,7 +731,15 @@ test('32. 备份包 - 创建和恢复', () => {
 
   assertEqual(result.importedNotes.length, 2, '应该恢复2篇');
   assertEqual(lib2.notes.getCount(), 2, '总笔记数应该为2');
-  assert(lib2.history.getVisitCount(n1.id) >= 2, '历史记录应该恢复');
+
+  const allNotes = lib2.notes.list();
+  const restored1 = allNotes.find(n => n.title === '备份笔记1')!;
+  const restored2 = allNotes.find(n => n.title === '备份笔记2')!;
+  assert(restored1 !== undefined, '应该能按标题找到备份笔记1');
+  assert(restored2 !== undefined, '应该能按标题找到备份笔记2');
+
+  assert(lib2.history.getVisitCount(restored1.id) >= 2, '历史记录应该恢复');
+  assert(lib2.history.getVisitCount(restored2.id) >= 1, 'n2的历史记录应该恢复');
 
   const restored = lib2.notes.getByTitle('备份笔记1');
   assert(restored !== null, '应该能按标题找到');
@@ -949,6 +957,248 @@ test('40. 导入覆盖时附件同步更新', () => {
   assertEqual(updatedNote.attachments[0].name, 'new.pdf', '第一个附件应该是new.pdf');
   assertEqual(updatedNote.attachments[1].name, 'image.png', '第二个附件应该是image.png');
   assertEqual(updatedNote.content, '更新后的内容', '内容应该更新');
+});
+
+test('41. Markdown导出导入完整迁移验收', () => {
+  const lib1 = new KnowledgeLibrary();
+  const createdAt = Date.now() - 86400000 * 7;
+  const updatedAt = Date.now() - 86400000;
+
+  const { note: original } = lib1.notes.create({
+    title: '完整迁移测试笔记',
+    content: '这是一篇包含 [[另一篇]] 链接的笔记\n\n正文内容...',
+    tags: ['重要', '技术', '迁移'],
+    isFavorite: true,
+    summary: '自定义摘要：这是测试笔记的摘要信息',
+    attachments: [
+      { name: '设计文档.pdf', type: 'application/pdf', size: 2048, path: '/docs/design.pdf' },
+      { name: '截图.png', type: 'image/png', size: 512, path: '/images/screenshot.png' }
+    ],
+    metadata: { priority: 'high', author: '张三', version: 'v2.1', reviewCount: 5 },
+    createdAt,
+    updatedAt
+  });
+
+  const mdFiles = lib1.io.export({ format: 'markdown' }) as { filename: string; content: string }[];
+  assertEqual(mdFiles.length, 1, '应该导出1个文件');
+  assert(mdFiles[0].content.includes('完整迁移测试笔记'), '应该包含标题');
+  assert(mdFiles[0].content.includes('summary: 自定义摘要'), '应该包含摘要元数据');
+  assert(mdFiles[0].content.includes('tags: 重要, 技术, 迁移'), '应该包含标签');
+  assert(mdFiles[0].content.includes('favorite: true'), '应该包含收藏标记');
+  assert(mdFiles[0].content.includes('metadata: {'), '应该包含自定义信息');
+  assert(mdFiles[0].content.includes('设计文档.pdf'), '应该包含附件');
+  assert(mdFiles[0].content.includes('priority'), '应该包含priority自定义字段');
+
+  const lib2 = new KnowledgeLibrary();
+  const result = lib2.io.importMarkdown(mdFiles, { conflictStrategy: 'rename', keepMetadata: true });
+
+  assertEqual(result.importedNotes.length, 1, '应该导入1篇');
+  const imported = result.importedNotes[0];
+
+  const queried = lib2.notes.get(imported.id)!;
+  assertEqual(queried.title, '完整迁移测试笔记', '标题应该正确');
+  assertEqual(queried.isFavorite, true, '收藏状态应该正确');
+  assertEqual(queried.tags.length, 3, '标签数量应该正确');
+  assertEqual(queried.tags[0], '重要', '标签1应该正确');
+  assertEqual(queried.tags[1], '技术', '标签2应该正确');
+  assertEqual(queried.tags[2], '迁移', '标签3应该正确');
+  assertEqual(queried.summary, '自定义摘要：这是测试笔记的摘要信息', '摘要应该正确');
+  assertEqual(queried.attachments.length, 2, '附件数量应该正确');
+  assertEqual(queried.attachments[0].name, '设计文档.pdf', '附件1名称应该正确');
+  assertEqual(queried.attachments[1].name, '截图.png', '附件2名称应该正确');
+  assertEqual(queried.createdAt, createdAt, '创建时间应该正确');
+  assertEqual(queried.updatedAt, updatedAt, '更新时间应该正确');
+  assertEqual((queried.metadata as any).priority, 'high', 'metadata.priority应该正确');
+  assertEqual((queried.metadata as any).author, '张三', 'metadata.author应该正确');
+  assertEqual((queried.metadata as any).version, 'v2.1', 'metadata.version应该正确');
+  assertEqual((queried.metadata as any).reviewCount, 5, 'metadata.reviewCount应该正确');
+});
+
+test('42. 备份包恢复后最近访问和访问统计验收', () => {
+  const lib1 = new KnowledgeLibrary();
+
+  const { note: n1 } = lib1.notes.create({ title: '备份笔记A', content: '内容A', tags: ['tag1'] });
+  const { note: n2 } = lib1.notes.create({ title: '备份笔记B', content: '内容B [[备份笔记A]]', tags: ['tag2'] });
+  const { note: n3 } = lib1.notes.create({ title: '备份笔记C', content: '内容C' });
+
+  lib1.notes.get(n1.id);
+  lib1.notes.get(n2.id);
+  lib1.notes.get(n1.id);
+  lib1.notes.get(n3.id);
+  lib1.notes.get(n1.id);
+  lib1.notes.get(n2.id);
+
+  assertEqual(lib1.history.getVisitCount(n1.id), 3, 'n1应该访问3次');
+  assertEqual(lib1.history.getVisitCount(n2.id), 2, 'n2应该访问2次');
+  assertEqual(lib1.history.getVisitCount(n3.id), 1, 'n3应该访问1次');
+
+  const recent = lib1.history.getRecent(10);
+  assertEqual(recent.length, 3, '最近访问应该有3条');
+
+  const backup = lib1.io.createBackup({ includeHistory: true });
+  assertEqual(backup.history.length, 6, '备份应该包含6条历史记录');
+
+  const lib2 = new KnowledgeLibrary();
+  const restoreResult = lib2.io.restoreBackup(backup, { conflictStrategy: 'rename' });
+
+  assertEqual(restoreResult.importedNotes.length, 3, '应该恢复3篇');
+
+  const allNotes = lib2.notes.list();
+  const restoredN1 = allNotes.find(n => n.title === '备份笔记A')!;
+  const restoredN2 = allNotes.find(n => n.title === '备份笔记B')!;
+  const restoredN3 = allNotes.find(n => n.title === '备份笔记C')!;
+
+  assert(restoredN1 !== undefined, '应该能找到备份笔记A');
+  assert(restoredN2 !== undefined, '应该能找到备份笔记B');
+  assert(restoredN3 !== undefined, '应该能找到备份笔记C');
+
+  assertEqual(lib2.history.getVisitCount(restoredN1.id), 3, 'n1访问次数应该恢复');
+  assertEqual(lib2.history.getVisitCount(restoredN2.id), 2, 'n2访问次数应该恢复');
+  assertEqual(lib2.history.getVisitCount(restoredN3.id), 1, 'n3访问次数应该恢复');
+
+  const restoredRecent = lib2.history.getRecent(10);
+  assertEqual(restoredRecent.length, 3, '最近访问列表应该有3条');
+  assertEqual(restoredRecent[0].noteTitle, '备份笔记B', '最近第一条应该是B');
+  assertEqual(restoredRecent[1].noteTitle, '备份笔记A', '最近第二条应该是A');
+  assertEqual(restoredRecent[2].noteTitle, '备份笔记C', '最近第三条应该是C');
+
+  const activeNotes = lib2.history.getActiveNotes({ limit: 10 });
+  assertEqual(activeNotes.length >= 3, true, '活跃笔记至少有3个');
+  const n1Active = activeNotes.find(a => a.note.id === restoredN1.id);
+  assert(n1Active !== undefined, 'n1应该在活跃列表中');
+  assertEqual(n1Active!.visitCount, 3, 'n1访问次数应该是3');
+});
+
+test('43. 搜索分页游标完整翻页验收', () => {
+  const lib = new KnowledgeLibrary();
+
+  for (let i = 1; i <= 47; i++) {
+    const tags = i % 3 === 0 ? ['技术', '重要'] : i % 3 === 1 ? ['技术'] : ['生活'];
+    lib.notes.create({
+      title: `技术文档${i.toString().padStart(2, '0')}`,
+      content: `这是第${i}篇技术文档，包含搜索关键词`,
+      tags,
+      isFavorite: i % 5 === 0
+    });
+  }
+
+  const allResults = lib.search.query({ query: '关键词', tagFilters: ['技术'], sortBy: 'title', sortOrder: 'asc', limit: undefined });
+  assertEqual(allResults.length, 31, '技术标签总结果应该是31个');
+
+  const pageSize = 10;
+  const page1 = lib.search.queryPaginated({
+    query: '关键词',
+    tagFilters: ['技术'],
+    sortBy: 'title',
+    sortOrder: 'asc',
+    limit: pageSize
+  });
+
+  assertEqual(page1.total, 31, '总数应该是31');
+  assertEqual(page1.results.length, pageSize, '第一页应该有10条');
+  assertEqual(page1.hasMore, true, '应该有更多');
+  assertEqual(page1.results[0].note.title, '技术文档01', '第一条应该是01');
+  assertEqual(page1.results[9].note.title, '技术文档15', '第十条应该是15');
+
+  let currentPage = page1;
+  let pageNum = 1;
+  const allIds: string[] = [];
+
+  while (currentPage.hasMore) {
+    pageNum++;
+    const next = lib.search.continueSearch(currentPage.cursor.cacheKey);
+    assert(next !== null, `第${pageNum}页应该能获取`);
+    assertEqual(next!.total, 31, `第${pageNum}页总数应该保持31`);
+    assertEqual(next!.cursor.options.sortBy, 'title', `第${pageNum}页排序应该保持`);
+    assertEqual(next!.cursor.options.sortOrder, 'asc', `第${pageNum}页排序方向应该保持`);
+    assertEqual(next!.cursor.options.tagFilters?.length, 1, `第${pageNum}页标签筛选应该保持`);
+    assertEqual(next!.cursor.options.tagFilters?.[0], '技术', `第${pageNum}页标签值应该保持`);
+
+    currentPage.results.forEach(r => allIds.push(r.note.id));
+    currentPage = next!;
+  }
+
+  currentPage.results.forEach(r => allIds.push(r.note.id));
+
+  assertEqual(pageNum, 4, '应该有4页');
+  assertEqual(allIds.length, 31, '所有结果应该是31条');
+  assertEqual(currentPage.results.length, 1, '最后一页应该有1条');
+  assertEqual(currentPage.hasMore, false, '最后一页应该没有更多');
+
+  const uniqueIds = new Set(allIds);
+  assertEqual(uniqueIds.size, 31, '不应该有重复结果');
+
+  assertEqual(allIds[0], allResults[0].note.id, '第一条ID应该匹配');
+  assertEqual(allIds[30], allResults[30].note.id, '最后一条ID应该匹配');
+  assertEqual(allIds[9], allResults[9].note.id, '第10条ID应该匹配');
+  assertEqual(allIds[10], allResults[10].note.id, '第11条ID应该匹配');
+});
+
+test('44. 导入预览多个重名笔记重命名不冲突验收', () => {
+  const lib = new KnowledgeLibrary();
+  lib.notes.create({ title: '需求文档', content: '已存在的需求文档', tags: ['旧'] });
+
+  const importData = {
+    version: '1.0.0',
+    notes: [
+      { title: '需求文档', content: '新需求文档v1', tags: ['v1'] },
+      { title: '需求文档', content: '新需求文档v2', tags: ['v2'] },
+      { title: '需求文档', content: '新需求文档v3', tags: ['v3'] },
+      { title: '全新文档', content: '全新的文档', tags: ['new'] },
+      { title: '全新文档', content: '另一份全新文档', tags: ['new2'] }
+    ]
+  };
+
+  const preview = lib.io.previewImportJSON(JSON.stringify(importData), { conflictStrategy: 'rename' });
+
+  assertEqual(preview.summary.total, 5, '总共应该5条');
+  assertEqual(preview.summary.toRename, 4, '应该重命名4条');
+  assertEqual(preview.summary.toCreate, 1, '应该创建1条');
+  assertEqual(preview.summary.toSkip, 0, '应该跳过0条');
+  assertEqual(preview.summary.toOverwrite, 0, '应该覆盖0条');
+
+  const renameItems = preview.items.filter(i => i.action === 'rename');
+  assertEqual(renameItems.length, 4, '重命名项应该有4个');
+
+  const newTitles = renameItems.map(i => i.newTitle!);
+  const uniqueNewTitles = new Set(newTitles.map(t => t.toLowerCase()));
+  assertEqual(uniqueNewTitles.size, 4, '新标题应该全部唯一，不冲突');
+
+  assert(newTitles.includes('需求文档 (1)'), '应该有需求文档 (1)');
+  assert(newTitles.includes('需求文档 (2)'), '应该有需求文档 (2)');
+  assert(newTitles.includes('需求文档 (3)'), '应该有需求文档 (3)');
+  assert(newTitles.includes('全新文档 (1)'), '应该有全新文档 (1)');
+  assert(!newTitles.includes('全新文档 (2)'), '不应该有全新文档 (2)');
+
+  const result = lib.io.importJSON(JSON.stringify(importData), { conflictStrategy: 'rename' });
+
+  assertEqual(result.renamedCount, 4, '实际导入应该重命名4条');
+  assertEqual(result.successCount, 5, '应该成功导入5条');
+
+  const importedTitles = result.importedNotes.map(n => n.title);
+  const uniqueImported = new Set(importedTitles.map(t => t.toLowerCase()));
+  assertEqual(uniqueImported.size, 5, '导入后的标题应该全部唯一');
+
+  const found1 = lib.notes.getByTitle('需求文档 (1)');
+  const found2 = lib.notes.getByTitle('需求文档 (2)');
+  const found3 = lib.notes.getByTitle('需求文档 (3)');
+  const foundNew = lib.notes.getByTitle('全新文档');
+  const foundNew1 = lib.notes.getByTitle('全新文档 (1)');
+  const foundOriginal = lib.notes.getByTitle('需求文档');
+
+  assert(found1 !== null, '应该能找到需求文档 (1)');
+  assert(found2 !== null, '应该能找到需求文档 (2)');
+  assert(found3 !== null, '应该能找到需求文档 (3)');
+  assert(foundNew !== null, '应该能找到全新文档');
+  assert(foundNew1 !== null, '应该能找到全新文档 (1)');
+  assert(foundOriginal !== null, '原有的需求文档应该还在');
+
+  assertEqual(found1!.tags[0], 'v1', '需求文档 (1)标签应该是v1');
+  assertEqual(found2!.tags[0], 'v2', '需求文档 (2)标签应该是v2');
+  assertEqual(found3!.tags[0], 'v3', '需求文档 (3)标签应该是v3');
+  assertEqual(foundNew!.tags[0], 'new', '全新文档标签应该是new');
+  assertEqual(foundNew1!.tags[0], 'new2', '全新文档 (1)标签应该是new2');
+  assertEqual(foundOriginal!.tags[0], '旧', '原有需求文档标签应该是旧');
 });
 
 console.log(`\n=== 测试结果 ===`);

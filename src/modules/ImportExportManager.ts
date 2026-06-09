@@ -1,4 +1,4 @@
-import type { Note, ExportOptions, ImportResult, Attachment, WikiLink, CreateNoteOptions } from '../types';
+import type { Note, ExportOptions, ImportResult, ImportOptions, ImportConflictStrategy, Attachment, WikiLink, CreateNoteOptions } from '../types';
 import { generateId, generateAttachmentId, normalizeTags, getCurrentTimestamp, normalizeTag } from '../utils';
 
 export class ImportExportManager {
@@ -85,16 +85,14 @@ export class ImportExportManager {
       if (note.tags.length > 0) {
         metadata.push(`tags: ${note.tags.join(', ')}`);
       }
+      if (note.summary) {
+        metadata.push(`summary: ${note.summary}`);
+      }
       
       lines.push('---');
       lines.push(...metadata);
       lines.push('---');
       lines.push('');
-      
-      if (note.summary) {
-        lines.push(`> ${note.summary}`);
-        lines.push('');
-      }
       
       lines.push(note.content);
       
@@ -126,30 +124,57 @@ export class ImportExportManager {
     });
   }
 
-  importFromJSON(jsonString: string): ImportResult {
+  importFromJSON(
+    jsonString: string,
+    options: ImportOptions = {},
+    existingNotes: Note[] = []
+  ): { result: ImportResult; notesToCreate: CreateNoteOptions[]; notesToUpdate: { id: string; options: CreateNoteOptions }[] } {
     const result: ImportResult = {
       successCount: 0,
       failedCount: 0,
+      skippedCount: 0,
+      overwrittenCount: 0,
+      renamedCount: 0,
       errors: [],
-      importedNoteIds: []
+      importedNotes: [],
+      importedNoteIds: [],
+      skippedNotes: [],
+      overwrittenNotes: [],
+      renamedNotes: []
     };
+
+    const notesToCreate: CreateNoteOptions[] = [];
+    const notesToUpdate: { id: string; options: CreateNoteOptions }[] = [];
 
     try {
       const data = JSON.parse(jsonString);
-      const notes = Array.isArray(data) ? data : (data.notes || []);
+      const notesData = Array.isArray(data) ? data : (data.notes || []);
 
-      for (let i = 0; i < notes.length; i++) {
+      for (let i = 0; i < notesData.length; i++) {
         try {
-          const noteData = notes[i];
-          const note = this.validateAndConvertNote(noteData);
-          result.importedNoteIds.push(note.id);
-          result.successCount++;
+          const noteData = notesData[i];
+          const validatedNote = this.validateAndConvertNote(noteData, options);
+          
+          const processed = this.processImportedNote(
+            validatedNote,
+            options,
+            existingNotes,
+            notesToCreate,
+            notesToUpdate,
+            result
+          );
+
+          if (processed) {
+            result.importedNotes.push(processed);
+            result.importedNoteIds.push(processed.id);
+            result.successCount++;
+          }
         } catch (error) {
           result.failedCount++;
           result.errors.push({
             index: i,
             message: error instanceof Error ? error.message : '未知错误',
-            data: notes[i]
+            data: notesData[i]
           });
         }
       }
@@ -161,23 +186,50 @@ export class ImportExportManager {
       });
     }
 
-    return result;
+    return { result, notesToCreate, notesToUpdate };
   }
 
-  importFromMarkdown(markdownFiles: { filename: string; content: string }[]): ImportResult {
+  importFromMarkdown(
+    markdownFiles: { filename: string; content: string }[],
+    options: ImportOptions = {},
+    existingNotes: Note[] = []
+  ): { result: ImportResult; notesToCreate: CreateNoteOptions[]; notesToUpdate: { id: string; options: CreateNoteOptions }[] } {
     const result: ImportResult = {
       successCount: 0,
       failedCount: 0,
+      skippedCount: 0,
+      overwrittenCount: 0,
+      renamedCount: 0,
       errors: [],
-      importedNoteIds: []
+      importedNotes: [],
+      importedNoteIds: [],
+      skippedNotes: [],
+      overwrittenNotes: [],
+      renamedNotes: []
     };
+
+    const notesToCreate: CreateNoteOptions[] = [];
+    const notesToUpdate: { id: string; options: CreateNoteOptions }[] = [];
 
     for (let i = 0; i < markdownFiles.length; i++) {
       try {
         const file = markdownFiles[i];
-        const note = this.parseMarkdownNote(file.filename, file.content);
-        result.importedNoteIds.push(note.id);
-        result.successCount++;
+        const parsedNote = this.parseMarkdownNote(file.filename, file.content, options);
+        
+        const processed = this.processImportedNote(
+          parsedNote,
+          options,
+          existingNotes,
+          notesToCreate,
+          notesToUpdate,
+          result
+        );
+
+        if (processed) {
+          result.importedNotes.push(processed);
+          result.importedNoteIds.push(processed.id);
+          result.successCount++;
+        }
       } catch (error) {
         result.failedCount++;
         result.errors.push({
@@ -188,10 +240,100 @@ export class ImportExportManager {
       }
     }
 
-    return result;
+    return { result, notesToCreate, notesToUpdate };
   }
 
-  private validateAndConvertNote(data: any): Note {
+  private processImportedNote(
+    note: Note,
+    options: ImportOptions,
+    existingNotes: Note[],
+    notesToCreate: CreateNoteOptions[],
+    notesToUpdate: { id: string; options: CreateNoteOptions }[],
+    result: ImportResult
+  ): Note | null {
+    const conflictStrategy: ImportConflictStrategy = options.conflictStrategy || 'skip';
+    const normalizedTitle = note.title.toLowerCase().trim();
+    
+    const existingNote = existingNotes.find(n => 
+      n.title.toLowerCase().trim() === normalizedTitle
+    );
+
+    if (existingNote) {
+      switch (conflictStrategy) {
+        case 'skip':
+          result.skippedCount++;
+          result.skippedNotes.push({
+            title: note.title,
+            existingId: existingNote.id
+          });
+          return null;
+
+        case 'overwrite':
+          result.overwrittenCount++;
+          result.overwrittenNotes.push({
+            title: note.title,
+            oldId: existingNote.id,
+            newId: note.id
+          });
+          notesToUpdate.push({
+            id: existingNote.id,
+            options: this.noteToCreateOptions(note, options)
+          });
+          return { ...note, id: existingNote.id };
+
+        case 'rename':
+          result.renamedCount++;
+          let newTitle = this.generateUniqueTitle(note.title, existingNotes);
+          result.renamedNotes.push({
+            oldTitle: note.title,
+            newTitle,
+            noteId: note.id
+          });
+          const renamedNote = { ...note, title: newTitle };
+          notesToCreate.push(this.noteToCreateOptions(renamedNote, options));
+          return renamedNote;
+      }
+    }
+
+    notesToCreate.push(this.noteToCreateOptions(note, options));
+    return note;
+  }
+
+  private generateUniqueTitle(baseTitle: string, existingNotes: Note[]): string {
+    const existingTitles = new Set(existingNotes.map(n => n.title.toLowerCase()));
+    let counter = 1;
+    let newTitle = `${baseTitle} (${counter})`;
+    
+    while (existingTitles.has(newTitle.toLowerCase())) {
+      counter++;
+      newTitle = `${baseTitle} (${counter})`;
+    }
+    
+    return newTitle;
+  }
+
+  private noteToCreateOptions(note: Note, options: ImportOptions): CreateNoteOptions {
+    const createOptions: CreateNoteOptions = {
+      title: note.title,
+      content: note.content,
+      tags: options.keepTags !== false ? note.tags : [],
+      isFavorite: options.keepFavorites !== false ? note.isFavorite : false,
+      metadata: options.keepMetadata !== false ? note.metadata : {}
+    };
+
+    if (options.keepAttachments !== false && note.attachments.length > 0) {
+      createOptions.attachments = note.attachments.map(a => ({
+        name: a.name,
+        path: a.path,
+        type: a.type,
+        size: a.size
+      }));
+    }
+
+    return createOptions;
+  }
+
+  private validateAndConvertNote(data: any, options: ImportOptions = {}): Note {
     if (!data || typeof data !== 'object') {
       throw new Error('笔记数据格式无效');
     }
@@ -201,15 +343,17 @@ export class ImportExportManager {
     }
 
     const now = getCurrentTimestamp();
-    const attachments: Attachment[] = (data.attachments || []).map((att: any) => ({
-      id: att.id || generateAttachmentId(),
-      name: att.name || '未命名',
-      path: att.path || '',
-      type: att.type || '',
-      size: att.size || 0,
-      noteId: data.id || generateId(),
-      createdAt: att.createdAt || now
-    }));
+    const attachments: Attachment[] = options.keepAttachments !== false
+      ? (data.attachments || []).map((att: any) => ({
+          id: att.id || generateAttachmentId(),
+          name: att.name || '未命名',
+          path: att.path || '',
+          type: att.type || '',
+          size: att.size || 0,
+          noteId: data.id || generateId(),
+          createdAt: att.createdAt || now
+        }))
+      : [];
 
     const outLinks: WikiLink[] = (data.outLinks || []).map((link: any) => ({
       targetId: link.targetId || '',
@@ -223,25 +367,33 @@ export class ImportExportManager {
       id: data.id || generateId(),
       title: data.title.trim(),
       content: data.content || '',
-      summary: data.summary,
-      tags: normalizeTags(data.tags || []),
-      isFavorite: !!data.isFavorite,
+      summary: options.keepSummary !== false ? data.summary : undefined,
+      tags: options.keepTags !== false ? normalizeTags(data.tags || []) : [],
+      isFavorite: options.keepFavorites !== false ? !!data.isFavorite : false,
       attachments,
       outLinks,
-      createdAt: data.createdAt || now,
-      updatedAt: data.updatedAt || now,
+      createdAt: options.keepCreationTime !== false && data.createdAt ? data.createdAt : now,
+      updatedAt: options.keepUpdateTime !== false && data.updatedAt ? data.updatedAt : now,
       lastVisitedAt: data.lastVisitedAt,
-      metadata: data.metadata || {}
+      metadata: options.keepMetadata !== false ? data.metadata || {} : {}
     };
   }
 
-  private parseMarkdownNote(filename: string, content: string): Note {
+  private parseMarkdownNote(
+    filename: string,
+    content: string,
+    options: ImportOptions = {}
+  ): Note {
     const lines = content.split('\n');
     let currentLine = 0;
     
     let title = filename.replace(/\.md$/i, '');
     if (lines[currentLine]?.startsWith('# ')) {
       title = lines[currentLine].substring(2).trim();
+      currentLine++;
+    }
+
+    while (currentLine < lines.length && lines[currentLine]?.trim() === '') {
       currentLine++;
     }
 
@@ -272,6 +424,10 @@ export class ImportExportManager {
       currentLine++;
     }
 
+    if (!summary && metadata.summary && options.keepSummary !== false) {
+      summary = metadata.summary;
+    }
+
     const contentLines: string[] = [];
     const attachments: Attachment[] = [];
     
@@ -279,7 +435,7 @@ export class ImportExportManager {
       const line = lines[currentLine];
       
       const attachmentMatch = line.match(/^-\s*\[([^\]]+)\]\(([^)]+)\)\s*\(([^,]+),\s*([^)]+)\)/);
-      if (attachmentMatch) {
+      if (attachmentMatch && options.keepAttachments !== false) {
         const [, name, path, type, sizeStr] = attachmentMatch;
         const sizeMatch = sizeStr.match(/(\d+)/);
         attachments.push({
@@ -304,18 +460,19 @@ export class ImportExportManager {
     }
 
     let tags: string[] = [];
-    if (metadata.tags) {
+    if (metadata.tags && options.keepTags !== false) {
       tags = metadata.tags.split(',').map(t => t.trim()).filter(t => t);
     }
 
-    let createdAt = getCurrentTimestamp();
-    if (metadata.created) {
+    const now = getCurrentTimestamp();
+    let createdAt = now;
+    if (metadata.created && options.keepCreationTime !== false) {
       const parsed = Date.parse(metadata.created);
       if (!isNaN(parsed)) createdAt = parsed;
     }
 
     let updatedAt = createdAt;
-    if (metadata.updated) {
+    if (metadata.updated && options.keepUpdateTime !== false) {
       const parsed = Date.parse(metadata.updated);
       if (!isNaN(parsed)) updatedAt = parsed;
     }
@@ -334,14 +491,14 @@ export class ImportExportManager {
       title: title.trim(),
       content: noteContent,
       summary,
-      tags: normalizeTags(tags),
-      isFavorite: metadata.favorite === 'true',
+      tags: options.keepTags !== false ? normalizeTags(tags) : [],
+      isFavorite: options.keepFavorites !== false ? metadata.favorite === 'true' : false,
       attachments,
       outLinks,
       createdAt,
       updatedAt,
       lastVisitedAt,
-      metadata: {}
+      metadata: options.keepMetadata !== false ? {} : {}
     };
   }
 

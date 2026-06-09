@@ -40,26 +40,44 @@ export interface Tag {
   count: number;
 }
 
+export type ImportConflictStrategy = 'skip' | 'overwrite' | 'rename';
+
 export interface SearchOptions {
   query: string;
   searchInTitle?: boolean;
   searchInContent?: boolean;
   searchInTags?: boolean;
   tagFilters?: string[];
+  tagFilterMode?: 'any' | 'all';
+  isFavorite?: boolean;
+  hasAttachments?: boolean;
+  attachmentTypes?: string[];
+  dateFrom?: number;
+  dateTo?: number;
+  dateField?: 'createdAt' | 'updatedAt' | 'lastVisitedAt';
+  sortBy?: 'score' | 'createdAt' | 'updatedAt' | 'title';
+  sortOrder?: 'asc' | 'desc';
   limit?: number;
   offset?: number;
   caseSensitive?: boolean;
   enableHighlight?: boolean;
+  enableSnippet?: boolean;
+  snippetLength?: number;
+}
+
+export interface SearchMatch {
+  field: 'title' | 'content' | 'tags';
+  matchedText: string;
+  highlighted?: string;
+  snippet?: string;
+  position?: number;
 }
 
 export interface SearchResult {
   note: Note;
   score: number;
-  matches: {
-    field: 'title' | 'content' | 'tags';
-    matchedText: string;
-    highlighted?: string;
-  }[];
+  matches: SearchMatch[];
+  bestSnippet?: string;
 }
 
 export interface SimilarNote {
@@ -124,15 +142,43 @@ export interface ExportOptions {
   tagFilters?: string[];
 }
 
+export interface ImportOptions {
+  conflictStrategy?: ImportConflictStrategy;
+  keepCreationTime?: boolean;
+  keepUpdateTime?: boolean;
+  keepFavorites?: boolean;
+  keepTags?: boolean;
+  keepAttachments?: boolean;
+  keepSummary?: boolean;
+  keepMetadata?: boolean;
+}
+
 export interface ImportResult {
   successCount: number;
   failedCount: number;
+  skippedCount: number;
+  overwrittenCount: number;
+  renamedCount: number;
   errors: {
     index: number;
     message: string;
     data?: unknown;
   }[];
+  importedNotes: Note[];
   importedNoteIds: string[];
+  skippedNotes: { title: string; existingId: string }[];
+  overwrittenNotes: { title: string; oldId: string; newId: string }[];
+  renamedNotes: { oldTitle: string; newTitle: string; noteId: string }[];
+}
+
+export interface VisitStats {
+  noteId: string;
+  noteTitle: string;
+  totalVisits: number;
+  uniqueVisits: number;
+  firstVisitAt: number;
+  lastVisitAt: number;
+  averageVisitInterval?: number;
 }
 
 export interface KnowledgeLibraryConfig {

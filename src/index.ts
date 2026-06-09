@@ -9,9 +9,11 @@ import type {
   RelationGraph,
   ReferenceInfo,
   RecentVisit,
+  VisitStats,
   CreateNoteOptions,
   UpdateNoteOptions,
   ExportOptions,
+  ImportOptions,
   ImportResult,
   KnowledgeLibraryConfig
 } from './types';
@@ -120,14 +122,20 @@ export class KnowledgeLibrary {
   }
 
   notes = {
-    create: (options: CreateNoteOptions): Note => {
+    create: (options: CreateNoteOptions): { note: Note; fixedLinks: { sourceNoteId: string; sourceNoteTitle: string; fixedLinks: WikiLink[] }[] } => {
       let note = this.noteManager.createNote(options);
       this.tagManager.rebuildIndex(this.noteManager.getAllNotes());
       note = this.parseAndUpdateLinks(note);
       note = this.generateAndUpdateSummary(note);
       this.attachmentManager.rebuildIndex(this.noteManager.getAllNotes());
       this.searchEngine.rebuildIndex(this.noteManager.getAllNotes());
-      return note;
+      
+      const allNotes = this.noteManager.getAllNotes();
+      const fixedLinks = this.linkManager.fixMissingLinksForNewNote(note, allNotes);
+      
+      this.searchEngine.rebuildIndex(allNotes);
+      
+      return { note, fixedLinks };
     },
 
     get: (id: string): Note | undefined => {
@@ -152,24 +160,29 @@ export class KnowledgeLibrary {
       return this.noteManager.getAllNotes();
     },
 
-    update: (id: string, options: UpdateNoteOptions): Note | undefined => {
+    update: (id: string, options: UpdateNoteOptions): { note: Note | undefined; updatedReferences?: { updatedSourceNotes: string[]; updatedContent: { noteId: string; oldContent: string; newContent: string }[] } } => {
       const oldNote = this.noteManager.getNote(id);
-      if (!oldNote) return undefined;
+      if (!oldNote) return { note: undefined };
 
       const oldTags = oldNote.tags;
       const oldLinks = oldNote.outLinks;
+      const oldTitle = oldNote.title;
 
       let updatedNote = this.noteManager.updateNote(id, options);
-      if (!updatedNote) return undefined;
+      if (!updatedNote) return { note: undefined };
 
       if (options.tags !== undefined) {
         this.tagManager.updateNoteTags(updatedNote, oldTags, options.tags);
       }
 
-      if (options.title !== undefined) {
+      let updatedReferences;
+      if (options.title !== undefined && options.title !== oldTitle) {
         this.historyManager.updateNoteTitleInHistory(id, options.title);
         const allNotes = this.noteManager.getAllNotes();
-        this.linkManager.rebuildBackLinksIndex(allNotes);
+        updatedReferences = this.linkManager.updateNoteTitleAndFixReferences(id, oldTitle, options.title, allNotes);
+        for (const contentUpdate of updatedReferences.updatedContent) {
+          this.noteManager.updateNote(contentUpdate.noteId, { content: contentUpdate.newContent });
+        }
       }
 
       if (options.content !== undefined) {
@@ -181,12 +194,22 @@ export class KnowledgeLibrary {
       this.searchEngine.rebuildIndex(this.noteManager.getAllNotes());
       this.attachmentManager.rebuildIndex(this.noteManager.getAllNotes());
 
-      return updatedNote;
+      return { note: updatedNote, updatedReferences };
     },
 
-    delete: (id: string): boolean => {
+    delete: (id: string): { success: boolean; brokenLinks: { noteId: string; noteTitle: string; brokenLinks: WikiLink[] }[] } => {
       const note = this.noteManager.getNote(id);
-      if (!note) return false;
+      if (!note) return { success: false, brokenLinks: [] };
+
+      const allNotes = this.noteManager.getAllNotes().filter(n => n.id !== id);
+      const deletionResult = this.linkManager.handleNoteDeletion(id, note.title, allNotes);
+
+      for (const sourceNote of deletionResult.updatedSourceNotes) {
+        const currentNote = this.noteManager.getNote(sourceNote.noteId);
+        if (currentNote) {
+          this.noteManager.updateNote(sourceNote.noteId, { content: currentNote.content });
+        }
+      }
 
       this.tagManager.removeNoteFromAllTags(id);
       this.historyManager.removeFromHistory(id);
@@ -195,7 +218,8 @@ export class KnowledgeLibrary {
       if (success) {
         this.rebuildAllIndexes();
       }
-      return success;
+
+      return { success, brokenLinks: deletionResult.updatedSourceNotes };
     },
 
     toggleFavorite: (id: string): Note | undefined => {
@@ -342,8 +366,14 @@ export class KnowledgeLibrary {
       return this.linkManager.getLinkedNotes(this.noteManager.getAllNotes());
     },
 
-    getMissingLinks: (): { sourceId: string; targetTitle: string }[] => {
+    getMissingLinks: (): { sourceId: string; sourceTitle: string; targetTitle: string }[] => {
       return this.linkManager.resolveMissingLinks(this.noteManager.getAllNotes());
+    },
+
+    fixMissingLinks: (noteId: string) => {
+      const note = this.noteManager.getNote(noteId);
+      if (!note) return [];
+      return this.linkManager.fixMissingLinksForNewNote(note, this.noteManager.getAllNotes());
     },
 
     getSimilar: (noteId: string, options?: {
@@ -371,48 +401,78 @@ export class KnowledgeLibrary {
       return this.importExportManager.exportToJSON(this.noteManager.getAllNotes(), options);
     },
 
-    importJSON: (jsonString: string): ImportResult => {
-      const result = this.importExportManager.importFromJSON(jsonString);
-      
-      for (const noteId of result.importedNoteIds) {
-        const noteData = JSON.parse(jsonString);
-        const notesArray = Array.isArray(noteData) ? noteData : (noteData.notes || []);
-        const note = notesArray.find((n: any) => n.id === noteId);
-        if (note) {
-          try {
-            this.noteManager.createNote({
-              title: note.title,
-              content: note.content || '',
-              tags: note.tags || [],
-              isFavorite: note.isFavorite || false,
-              metadata: note.metadata || {}
-            });
-          } catch (e) {
+    importJSON: (jsonString: string, options: ImportOptions = {}): ImportResult => {
+      const existingNotes = this.noteManager.getAllNotes();
+      const { result, notesToCreate, notesToUpdate } = this.importExportManager.importFromJSON(
+        jsonString,
+        options,
+        existingNotes
+      );
+
+      for (const noteOptions of notesToCreate) {
+        try {
+          const { note } = this.notes.create(noteOptions);
+          const idx = result.importedNotes.findIndex(n => n.title === noteOptions.title);
+          if (idx >= 0) {
+            result.importedNotes[idx] = note;
+            result.importedNoteIds[idx] = note.id;
           }
+        } catch (e) {
+          // Error already recorded in result
         }
       }
-      
+
+      for (const update of notesToUpdate) {
+        try {
+          const { note } = this.notes.update(update.id, update.options);
+          const idx = result.importedNotes.findIndex(n => n.title === update.options.title);
+          if (idx >= 0 && note) {
+            result.importedNotes[idx] = note;
+            result.importedNoteIds[idx] = note.id;
+          }
+        } catch (e) {
+          // Error already recorded in result
+        }
+      }
+
       this.rebuildAllIndexes();
       return result;
     },
 
-    importMarkdown: (files: { filename: string; content: string }[]): ImportResult => {
-      const result = this.importExportManager.importFromMarkdown(files);
-      
-      for (let i = 0; i < result.importedNoteIds.length; i++) {
+    importMarkdown: (files: { filename: string; content: string }[], options: ImportOptions = {}): ImportResult => {
+      const existingNotes = this.noteManager.getAllNotes();
+      const { result, notesToCreate, notesToUpdate } = this.importExportManager.importFromMarkdown(
+        files,
+        options,
+        existingNotes
+      );
+
+      for (const noteOptions of notesToCreate) {
         try {
-          const note = this.importExportManager['parseMarkdownNote'](files[i].filename, files[i].content);
-          this.noteManager.createNote({
-            title: note.title,
-            content: note.content,
-            tags: note.tags,
-            isFavorite: note.isFavorite,
-            metadata: note.metadata
-          });
+          const { note } = this.notes.create(noteOptions);
+          const idx = result.importedNotes.findIndex(n => n.title === noteOptions.title);
+          if (idx >= 0) {
+            result.importedNotes[idx] = note;
+            result.importedNoteIds[idx] = note.id;
+          }
         } catch (e) {
+          // Error already recorded in result
         }
       }
-      
+
+      for (const update of notesToUpdate) {
+        try {
+          const { note } = this.notes.update(update.id, update.options);
+          const idx = result.importedNotes.findIndex(n => n.title === update.options.title);
+          if (idx >= 0 && note) {
+            result.importedNotes[idx] = note;
+            result.importedNoteIds[idx] = note.id;
+          }
+        } catch (e) {
+          // Error already recorded in result
+        }
+      }
+
       this.rebuildAllIndexes();
       return result;
     }
@@ -430,24 +490,62 @@ export class KnowledgeLibrary {
     getMostVisited: (options?: {
       limit?: number;
       since?: number;
-    }): { note: Note; visitCount: number }[] => {
+      until?: number;
+      includeStats?: boolean;
+    }): { note: Note; visitCount: number; uniqueVisits?: number; firstVisitAt?: number; lastVisitAt?: number }[] => {
       return this.historyManager.getMostVisited(this.noteManager.getAllNotes(), options);
     },
 
-    getVisitCount: (noteId: string, since?: number): number => {
-      return this.historyManager.getVisitCount(noteId, since);
+    getVisitCount: (noteId?: string, since?: number, until?: number): number => {
+      return this.historyManager.getVisitCount(noteId, since, until);
+    },
+
+    getUniqueVisitCount: (noteId?: string, since?: number, until?: number): number => {
+      return this.historyManager.getUniqueVisitCount(noteId, since, until);
+    },
+
+    getVisitStats: (noteId: string, options?: { since?: number; until?: number }): VisitStats | null => {
+      return this.historyManager.getVisitStats(noteId, this.noteManager.getAllNotes(), options);
     },
 
     getLastVisit: (noteId: string): RecentVisit | undefined => {
       return this.historyManager.getLastVisit(noteId);
     },
 
+    getFirstVisit: (noteId: string): RecentVisit | undefined => {
+      return this.historyManager.getFirstVisit(noteId);
+    },
+
+    getAllVisits: (options?: {
+      noteId?: string;
+      since?: number;
+      until?: number;
+      limit?: number;
+    }): RecentVisit[] => {
+      return this.historyManager.getAllVisits(options);
+    },
+
     getTimeline: (options?: {
       startDate?: number;
       endDate?: number;
       groupBy?: 'hour' | 'day' | 'week' | 'month';
+      noteId?: string;
     }) => {
       return this.historyManager.getVisitTimeline(options);
+    },
+
+    getHeatmap: (options?: {
+      startDate?: number;
+      endDate?: number;
+    }) => {
+      return this.historyManager.getVisitHeatmap(options);
+    },
+
+    getActiveNotes: (options?: {
+      since?: number;
+      limit?: number;
+    }) => {
+      return this.historyManager.getActiveNotes(this.noteManager.getAllNotes(), options);
     },
 
     clear: (): void => {

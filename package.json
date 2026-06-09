@@ -7,7 +7,8 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "test": "node dist/examples/basic-usage.js"
+    "test": "node dist/tests/knowledge-library.test.js",
+    "example": "node dist/examples/basic-usage.js"
   },
   "keywords": [
     "knowledge",

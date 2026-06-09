@@ -2,6 +2,7 @@ import type { Note, WikiLink, ReferenceInfo } from '../types';
 
 export class LinkManager {
   private backLinks: Map<string, WikiLink[]> = new Map();
+  private forwardLinks: Map<string, WikiLink[]> = new Map();
 
   parseLinks(content: string, notes: Note[]): WikiLink[] {
     const links: WikiLink[] = [];
@@ -34,8 +35,11 @@ export class LinkManager {
 
   rebuildBackLinksIndex(notes: Note[]): void {
     this.backLinks.clear();
+    this.forwardLinks.clear();
     
     for (const sourceNote of notes) {
+      this.forwardLinks.set(sourceNote.id, [...sourceNote.outLinks]);
+      
       for (const link of sourceNote.outLinks) {
         if (link.targetId) {
           if (!this.backLinks.has(link.targetId)) {
@@ -66,6 +70,8 @@ export class LinkManager {
       }
     }
 
+    this.forwardLinks.set(sourceNote.id, [...newLinks]);
+
     for (const link of newLinks) {
       if (link.targetId) {
         if (!this.backLinks.has(link.targetId)) {
@@ -78,6 +84,152 @@ export class LinkManager {
         });
       }
     }
+  }
+
+  fixMissingLinksForNewNote(newNote: Note, notes: Note[]): { sourceNoteId: string; sourceNoteTitle: string; fixedLinks: WikiLink[] }[] {
+    const fixes: { sourceNoteId: string; sourceNoteTitle: string; fixedLinks: WikiLink[] }[] = [];
+    const newNoteTitle = newNote.title.toLowerCase();
+
+    for (const sourceNote of notes) {
+      if (sourceNote.id === newNote.id) continue;
+
+      const linksToFix: WikiLink[] = [];
+      const updatedLinks: WikiLink[] = [];
+
+      for (const link of sourceNote.outLinks) {
+        if (!link.targetId && link.targetTitle.toLowerCase() === newNoteTitle) {
+          const fixedLink: WikiLink = {
+            ...link,
+            targetId: newNote.id
+          };
+          linksToFix.push(fixedLink);
+          updatedLinks.push(fixedLink);
+        } else {
+          updatedLinks.push(link);
+        }
+      }
+
+      if (linksToFix.length > 0) {
+        sourceNote.outLinks = updatedLinks;
+        this.forwardLinks.set(sourceNote.id, updatedLinks);
+
+        for (const link of linksToFix) {
+          if (!this.backLinks.has(newNote.id)) {
+            this.backLinks.set(newNote.id, []);
+          }
+          this.backLinks.get(newNote.id)!.push({
+            ...link,
+            targetId: sourceNote.id,
+            targetTitle: sourceNote.title
+          });
+        }
+
+        fixes.push({
+          sourceNoteId: sourceNote.id,
+          sourceNoteTitle: sourceNote.title,
+          fixedLinks: linksToFix
+        });
+      }
+    }
+
+    return fixes;
+  }
+
+  updateNoteTitleAndFixReferences(noteId: string, oldTitle: string, newTitle: string, notes: Note[]): {
+    updatedSourceNotes: string[];
+    updatedContent: { noteId: string; oldContent: string; newContent: string }[];
+  } {
+    const result = {
+      updatedSourceNotes: [] as string[],
+      updatedContent: [] as { noteId: string; oldContent: string; newContent: string }[]
+    };
+
+    const normalizedOldTitle = oldTitle.toLowerCase();
+
+    for (const sourceNote of notes) {
+      if (sourceNote.id === noteId) continue;
+
+      let contentChanged = false;
+      const oldContent = sourceNote.content;
+      let newContent = oldContent;
+
+      const linkPattern = new RegExp(`\\[\\[${escapeRegExp(oldTitle)}(#[^\\]|]+)?(\\|[^\\]]+)?\\]\\]`, 'gi');
+      newContent = newContent.replace(linkPattern, (match, anchor, displayText) => {
+        contentChanged = true;
+        let replacement = `[[${newTitle}`;
+        if (anchor) replacement += anchor;
+        if (displayText) replacement += displayText;
+        replacement += ']]';
+        return replacement;
+      });
+
+      if (contentChanged) {
+        result.updatedSourceNotes.push(sourceNote.id);
+        result.updatedContent.push({
+          noteId: sourceNote.id,
+          oldContent,
+          newContent
+        });
+
+        const updatedLinks = this.parseLinks(newContent, notes);
+        sourceNote.content = newContent;
+        sourceNote.outLinks = updatedLinks;
+        this.forwardLinks.set(sourceNote.id, updatedLinks);
+      }
+    }
+
+    this.rebuildBackLinksIndex(notes);
+
+    return result;
+  }
+
+  handleNoteDeletion(deletedNoteId: string, deletedNoteTitle: string, notes: Note[]): {
+    updatedSourceNotes: { noteId: string; noteTitle: string; brokenLinks: WikiLink[] }[];
+  } {
+    const result: {
+      updatedSourceNotes: { noteId: string; noteTitle: string; brokenLinks: WikiLink[] }[];
+    } = {
+      updatedSourceNotes: []
+    };
+
+    const backLinks = this.getBackLinks(deletedNoteId);
+    
+    for (const link of backLinks) {
+      const sourceNote = notes.find(n => n.id === link.targetId);
+      if (!sourceNote) continue;
+
+      const brokenLinks: WikiLink[] = [];
+      const updatedLinks: WikiLink[] = [];
+
+      for (const sl of sourceNote.outLinks) {
+        if (sl.targetId === deletedNoteId) {
+          brokenLinks.push({ ...sl, targetId: '' });
+          updatedLinks.push({ ...sl, targetId: '' });
+        } else {
+          updatedLinks.push(sl);
+        }
+      }
+
+      if (brokenLinks.length > 0) {
+        sourceNote.outLinks = updatedLinks;
+        this.forwardLinks.set(sourceNote.id, updatedLinks);
+        
+        result.updatedSourceNotes.push({
+          noteId: sourceNote.id,
+          noteTitle: sourceNote.title,
+          brokenLinks
+        });
+      }
+    }
+
+    this.backLinks.delete(deletedNoteId);
+    this.forwardLinks.delete(deletedNoteId);
+
+    for (const [targetId, links] of this.backLinks.entries()) {
+      this.backLinks.set(targetId, links.filter(l => l.targetId !== deletedNoteId));
+    }
+
+    return result;
   }
 
   getBackLinks(noteId: string): WikiLink[] {
@@ -97,14 +249,19 @@ export class LinkManager {
     return this.getOutLinks(noteId, notes).length;
   }
 
-  resolveMissingLinks(notes: Note[]): { sourceId: string; targetTitle: string }[] {
-    const missing: { sourceId: string; targetTitle: string }[] = [];
+  getForwardLinks(noteId: string): WikiLink[] {
+    return this.forwardLinks.get(noteId) || [];
+  }
+
+  resolveMissingLinks(notes: Note[]): { sourceId: string; sourceTitle: string; targetTitle: string }[] {
+    const missing: { sourceId: string; sourceTitle: string; targetTitle: string }[] = [];
     
     for (const note of notes) {
       for (const link of note.outLinks) {
         if (!link.targetId) {
           missing.push({
             sourceId: note.id,
+            sourceTitle: note.title,
             targetTitle: link.targetTitle
           });
         }
@@ -220,7 +377,30 @@ export class LinkManager {
     return paths;
   }
 
+  getAllLinks(): { sourceId: string; targetId: string; targetTitle: string }[] {
+    const links: { sourceId: string; targetId: string; targetTitle: string }[] = [];
+    
+    for (const [sourceId, outLinks] of this.forwardLinks.entries()) {
+      for (const link of outLinks) {
+        if (link.targetId) {
+          links.push({
+            sourceId,
+            targetId: link.targetId,
+            targetTitle: link.targetTitle
+          });
+        }
+      }
+    }
+    
+    return links;
+  }
+
   clear(): void {
     this.backLinks.clear();
+    this.forwardLinks.clear();
   }
+}
+
+function escapeRegExp(string: string): string {
+  return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

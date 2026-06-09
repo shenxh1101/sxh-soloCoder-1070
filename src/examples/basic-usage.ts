@@ -13,7 +13,7 @@ const library = new KnowledgeLibrary({
 
 console.log('1. 创建笔记...');
 
-const note1 = library.notes.create({
+const { note: note1 } = library.notes.create({
   title: 'JavaScript 基础入门',
   content: `JavaScript 是一种轻量级的编程语言，广泛用于 Web 开发。
 
@@ -34,7 +34,7 @@ JavaScript 支持多种数据类型，包括：
   isFavorite: true
 });
 
-const note2 = library.notes.create({
+const { note: note2 } = library.notes.create({
   title: 'JavaScript 高级教程',
   content: `本教程深入讲解 JavaScript 的高级特性。
 
@@ -57,7 +57,7 @@ Promise 和 async/await 是现代 JavaScript 异步编程的核心。
   isFavorite: false
 });
 
-const note3 = library.notes.create({
+const { note: note3 } = library.notes.create({
   title: 'TypeScript 入门指南',
   content: `TypeScript 是 JavaScript 的超集，添加了可选的静态类型和基于类的面向对象编程。
 
@@ -87,7 +87,7 @@ interface User {
   tags: ['typescript', 'javascript', '前端']
 });
 
-const note4 = library.notes.create({
+const { note: note4 } = library.notes.create({
   title: 'React 开发实践',
   content: `React 是一个用于构建用户界面的 JavaScript 库。
 

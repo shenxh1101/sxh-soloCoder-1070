@@ -1,0 +1,31 @@
+{
+  "name": "knowledge-library",
+  "version": "1.0.0",
+  "description": "知识管理类库 - 提供笔记管理、标签归类、双向链接、全文搜索、相似推荐、关系查询等能力",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "node dist/examples/basic-usage.js"
+  },
+  "keywords": [
+    "knowledge",
+    "notes",
+    "knowledge-base",
+    "wiki",
+    "markdown",
+    "full-text-search",
+    "backlinks",
+    "bidirectional-links"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "typescript": "^5.3.3",
+    "@types/node": "^20.10.0"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}

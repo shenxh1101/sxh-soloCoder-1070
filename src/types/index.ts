@@ -123,8 +123,11 @@ export interface CreateNoteOptions {
   content?: string;
   tags?: string[];
   isFavorite?: boolean;
+  summary?: string;
   attachments?: Omit<Attachment, 'id' | 'noteId' | 'createdAt'>[];
   metadata?: Record<string, unknown>;
+  createdAt?: number;
+  updatedAt?: number;
 }
 
 export interface UpdateNoteOptions {
@@ -132,7 +135,10 @@ export interface UpdateNoteOptions {
   content?: string;
   tags?: string[];
   isFavorite?: boolean;
+  summary?: string;
+  attachments?: Omit<Attachment, 'id' | 'noteId' | 'createdAt'>[];
   metadata?: Record<string, unknown>;
+  updatedAt?: number;
 }
 
 export interface ExportOptions {
@@ -189,4 +195,113 @@ export interface KnowledgeLibraryConfig {
   maxRecentVisits?: number;
   similarityThreshold?: number;
   enableFuzzySearch?: boolean;
+}
+
+export interface BackupPackage {
+  version: string;
+  exportedAt: number;
+  libraryVersion: string;
+  notes: Note[];
+  attachments: Attachment[];
+  history: RecentVisit[];
+  stats: {
+    noteCount: number;
+    attachmentCount: number;
+    tagCount: number;
+    historyCount: number;
+  };
+}
+
+export interface ImportPreviewItem {
+  title: string;
+  action: 'create' | 'skip' | 'overwrite' | 'rename';
+  existingId?: string;
+  newTitle?: string;
+  hasAttachments: boolean;
+  isFavorite: boolean;
+  tagCount: number;
+  createdAt?: number;
+  updatedAt?: number;
+}
+
+export interface ImportPreview {
+  items: ImportPreviewItem[];
+  summary: {
+    total: number;
+    toCreate: number;
+    toSkip: number;
+    toOverwrite: number;
+    toRename: number;
+  };
+  options: ImportOptions;
+}
+
+export interface GraphFilterOptions {
+  tagFilters?: string[];
+  tagFilterMode?: 'any' | 'all';
+  isFavorite?: boolean;
+  hasAttachments?: boolean;
+  attachmentTypes?: string[];
+  noteIds?: string[];
+  includeTags?: boolean;
+  maxDepth?: number;
+}
+
+export interface GraphAnalysis {
+  orphanNodes: Note[];
+  brokenLinkNodes: { note: Note; brokenLinks: WikiLink[] }[];
+  centralNodes: { note: Note; centrality: number; inDegree: number; outDegree: number }[];
+  isolatedClusters: { id: string; notes: Note[]; size: number }[];
+  stats: {
+    totalNodes: number;
+    totalEdges: number;
+    orphanCount: number;
+    brokenLinkCount: number;
+    averageDegree: number;
+    density: number;
+  };
+}
+
+export interface SavedSearchFilter {
+  id: string;
+  name: string;
+  options: SearchOptions;
+  createdAt: number;
+  usedAt: number;
+  useCount: number;
+}
+
+export interface SearchCursor {
+  offset: number;
+  total: number;
+  hasMore: boolean;
+  query: string;
+  options: SearchOptions;
+  cacheKey: string;
+  expiresAt: number;
+}
+
+export interface PaginatedSearchResult {
+  results: SearchResult[];
+  cursor: SearchCursor;
+  total: number;
+  hasMore: boolean;
+}
+
+export interface EnhancedSearchMatch {
+  field: 'title' | 'content' | 'tags';
+  matchedText: string;
+  highlightedText: string;
+  snippet: string;
+  position: number;
+  length: number;
+}
+
+export interface EnhancedSearchResult {
+  note: Note;
+  score: number;
+  matches: EnhancedSearchMatch[];
+  bestMatch: EnhancedSearchMatch;
+  bestSnippet: string;
+  highlightedTitle?: string;
 }

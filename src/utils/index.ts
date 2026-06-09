@@ -90,3 +90,28 @@ export function highlightText(text: string, keyword: string, caseSensitive: bool
 export function getCurrentTimestamp(): number {
   return Date.now();
 }
+
+export function generateSearchFilterId(): string {
+  return 'filter_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 10);
+}
+
+export function generateCursorId(): string {
+  return 'cursor_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 10);
+}
+
+export function hashString(str: string): string {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    const char = str.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash;
+  }
+  return Math.abs(hash).toString(36);
+}
+
+export function buildCacheKey(...parts: (string | number | boolean | undefined)[]): string {
+  return parts
+    .filter(p => p !== undefined && p !== null)
+    .map(p => String(p))
+    .join('|');
+}

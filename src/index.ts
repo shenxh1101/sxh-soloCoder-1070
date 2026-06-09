@@ -15,7 +15,14 @@ import type {
   ExportOptions,
   ImportOptions,
   ImportResult,
-  KnowledgeLibraryConfig
+  KnowledgeLibraryConfig,
+  BackupPackage,
+  ImportPreview,
+  GraphFilterOptions,
+  GraphAnalysis,
+  SavedSearchFilter,
+  PaginatedSearchResult,
+  EnhancedSearchResult
 } from './types';
 
 import { NoteManager } from './modules/NoteManager';
@@ -106,6 +113,10 @@ export class KnowledgeLibrary {
 
   private generateAndUpdateSummary(note: Note): Note {
     if (!this.config.autoGenerateSummary) return note;
+
+    if (note.summary) {
+      return note;
+    }
 
     const summary = this.summaryExtractor.extractSummary(note.content, {
       maxLength: this.config.summaryMaxLength
@@ -306,6 +317,50 @@ export class KnowledgeLibrary {
       );
     },
 
+    queryPaginated: (options: SearchOptions): PaginatedSearchResult => {
+      const limit = options.limit ?? this.config.searchResultLimit;
+      return this.searchEngine.searchWithPagination(
+        { ...options, limit },
+        this.noteManager.getAllNotes()
+      );
+    },
+
+    continueSearch: (cursorCacheKey: string): PaginatedSearchResult | null => {
+      return this.searchEngine.continueSearch(cursorCacheKey, this.noteManager.getAllNotes());
+    },
+
+    queryEnhanced: (options: SearchOptions): EnhancedSearchResult[] => {
+      return this.searchEngine.searchEnhanced(options, this.noteManager.getAllNotes());
+    },
+
+    saveFilter: (name: string, options: SearchOptions): SavedSearchFilter => {
+      return this.searchEngine.saveFilter(name, options);
+    },
+
+    getSavedFilters: (): SavedSearchFilter[] => {
+      return this.searchEngine.getSavedFilters();
+    },
+
+    getSavedFilter: (id: string): SavedSearchFilter | undefined => {
+      return this.searchEngine.getSavedFilter(id);
+    },
+
+    deleteFilter: (id: string): boolean => {
+      return this.searchEngine.deleteFilter(id);
+    },
+
+    getPopularFilters: (limit?: number): SavedSearchFilter[] => {
+      return this.searchEngine.getPopularFilters(limit);
+    },
+
+    queryWithFilter: (filterId: string, overrideOptions?: Partial<SearchOptions>): SearchResult[] | null => {
+      return this.searchEngine.searchWithSavedFilter(
+        filterId,
+        this.noteManager.getAllNotes(),
+        overrideOptions
+      );
+    },
+
     autocomplete: (query: string, limit?: number): string[] => {
       return this.searchEngine.autocomplete(query, this.noteManager.getAllNotes(), limit);
     },
@@ -338,6 +393,26 @@ export class KnowledgeLibrary {
       minLinkCount?: number;
     }): RelationGraph => {
       return this.graphBuilder.buildGraph(this.noteManager.getAllNotes(), options);
+    },
+
+    getFilteredGraph: (options: GraphFilterOptions): RelationGraph => {
+      return this.graphBuilder.buildFilteredGraph(this.noteManager.getAllNotes(), options);
+    },
+
+    analyzeGraph: (graph?: RelationGraph): GraphAnalysis => {
+      return this.graphBuilder.analyzeGraph(this.noteManager.getAllNotes(), graph);
+    },
+
+    getOrphanNodes: (): Note[] => {
+      return this.graphBuilder.getOrphanNodes(this.noteManager.getAllNotes());
+    },
+
+    getBrokenLinkNodes: (): { note: Note; brokenLinks: WikiLink[] }[] => {
+      return this.graphBuilder.getBrokenLinkNodes(this.noteManager.getAllNotes());
+    },
+
+    getCentralNodes: (limit?: number): GraphAnalysis['centralNodes'] => {
+      return this.graphBuilder.getCentralNodes(this.noteManager.getAllNotes(), limit);
     },
 
     getSubgraph: (centerNoteId: string, options?: {
@@ -401,6 +476,78 @@ export class KnowledgeLibrary {
       return this.importExportManager.exportToJSON(this.noteManager.getAllNotes(), options);
     },
 
+    createBackup: (options: { includeAttachments?: boolean; includeHistory?: boolean } = {}): BackupPackage => {
+      return this.importExportManager.createBackup(
+        this.noteManager.getAllNotes(),
+        this.historyManager.toJSON(),
+        options
+      );
+    },
+
+    restoreBackup: (backup: BackupPackage, options: ImportOptions = {}): ImportResult => {
+      const existingNotes = this.noteManager.getAllNotes();
+      const { result, notesToCreate, notesToUpdate, historyToRestore } = this.importExportManager.restoreBackup(
+        backup,
+        options,
+        existingNotes
+      );
+
+      for (const noteOptions of notesToCreate) {
+        try {
+          const { note } = this.notes.create(noteOptions);
+          const idx = result.importedNotes.findIndex(n => n.title === noteOptions.title);
+          if (idx >= 0) {
+            result.importedNotes[idx] = note;
+            result.importedNoteIds[idx] = note.id;
+          }
+        } catch (e) {
+        }
+      }
+
+      for (const update of notesToUpdate) {
+        try {
+          const { note } = this.notes.update(update.id, update.options);
+          const idx = result.importedNotes.findIndex(n => n.title === update.options.title);
+          if (idx >= 0 && note) {
+            result.importedNotes[idx] = note;
+            result.importedNoteIds[idx] = note.id;
+          }
+        } catch (e) {
+        }
+      }
+
+      if (historyToRestore.length > 0 && options.keepMetadata !== false) {
+        this.historyManager.fromJSON(historyToRestore);
+      }
+
+      this.rebuildAllIndexes();
+      return result;
+    },
+
+    previewImportJSON: (jsonString: string, options: ImportOptions = {}): ImportPreview => {
+      return this.importExportManager.previewImportJSON(
+        jsonString,
+        options,
+        this.noteManager.getAllNotes()
+      );
+    },
+
+    previewImportMarkdown: (files: { filename: string; content: string }[], options: ImportOptions = {}): ImportPreview => {
+      return this.importExportManager.previewImportMarkdown(
+        files,
+        options,
+        this.noteManager.getAllNotes()
+      );
+    },
+
+    previewRestoreBackup: (backup: BackupPackage, options: ImportOptions = {}): ImportPreview => {
+      return this.importExportManager.previewRestoreBackup(
+        backup,
+        options,
+        this.noteManager.getAllNotes()
+      );
+    },
+
     importJSON: (jsonString: string, options: ImportOptions = {}): ImportResult => {
       const existingNotes = this.noteManager.getAllNotes();
       const { result, notesToCreate, notesToUpdate } = this.importExportManager.importFromJSON(
@@ -418,7 +565,6 @@ export class KnowledgeLibrary {
             result.importedNoteIds[idx] = note.id;
           }
         } catch (e) {
-          // Error already recorded in result
         }
       }
 
@@ -431,7 +577,6 @@ export class KnowledgeLibrary {
             result.importedNoteIds[idx] = note.id;
           }
         } catch (e) {
-          // Error already recorded in result
         }
       }
 
@@ -456,7 +601,6 @@ export class KnowledgeLibrary {
             result.importedNoteIds[idx] = note.id;
           }
         } catch (e) {
-          // Error already recorded in result
         }
       }
 
@@ -469,7 +613,6 @@ export class KnowledgeLibrary {
             result.importedNoteIds[idx] = note.id;
           }
         } catch (e) {
-          // Error already recorded in result
         }
       }
 

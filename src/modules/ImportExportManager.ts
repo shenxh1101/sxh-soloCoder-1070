@@ -1,5 +1,25 @@
-import type { Note, ExportOptions, ImportResult, ImportOptions, ImportConflictStrategy, Attachment, WikiLink, CreateNoteOptions } from '../types';
-import { generateId, generateAttachmentId, normalizeTags, getCurrentTimestamp, normalizeTag } from '../utils';
+import type {
+  Note,
+  ExportOptions,
+  ImportResult,
+  ImportOptions,
+  ImportConflictStrategy,
+  Attachment,
+  WikiLink,
+  CreateNoteOptions,
+  BackupPackage,
+  ImportPreview,
+  ImportPreviewItem,
+  RecentVisit
+} from '../types';
+import {
+  generateId,
+  generateAttachmentId,
+  normalizeTags,
+  getCurrentTimestamp,
+  normalizeTag,
+  generateSearchFilterId
+} from '../utils';
 
 export class ImportExportManager {
   exportToJSON(notes: Note[], options: ExportOptions): string {
@@ -321,6 +341,18 @@ export class ImportExportManager {
       metadata: options.keepMetadata !== false ? note.metadata : {}
     };
 
+    if (options.keepSummary !== false && note.summary) {
+      createOptions.summary = note.summary;
+    }
+
+    if (options.keepCreationTime !== false && note.createdAt) {
+      createOptions.createdAt = note.createdAt;
+    }
+
+    if (options.keepUpdateTime !== false && note.updatedAt) {
+      createOptions.updatedAt = note.updatedAt;
+    }
+
     if (options.keepAttachments !== false && note.attachments.length > 0) {
       createOptions.attachments = note.attachments.map(a => ({
         name: a.name,
@@ -537,6 +569,178 @@ export class ImportExportManager {
       })),
       metadata: { ...note.metadata }
     }));
+  }
+
+  createBackup(
+    notes: Note[],
+    history: RecentVisit[],
+    options: { includeAttachments?: boolean; includeHistory?: boolean } = {}
+  ): BackupPackage {
+    const { includeAttachments = true, includeHistory = true } = options;
+    const now = getCurrentTimestamp();
+
+    const allAttachments: Attachment[] = [];
+    const exportNotes = notes.map(note => {
+      const noteCopy: Note = {
+        ...note,
+        attachments: includeAttachments ? note.attachments : []
+      };
+      if (includeAttachments) {
+        allAttachments.push(...note.attachments);
+      }
+      return noteCopy;
+    });
+
+    const tagSet = new Set<string>();
+    notes.forEach(n => n.tags.forEach(t => tagSet.add(t)));
+
+    return {
+      version: '1.0.0',
+      exportedAt: now,
+      libraryVersion: '1.0.0',
+      notes: exportNotes,
+      attachments: allAttachments,
+      history: includeHistory ? [...history] : [],
+      stats: {
+        noteCount: exportNotes.length,
+        attachmentCount: allAttachments.length,
+        tagCount: tagSet.size,
+        historyCount: includeHistory ? history.length : 0
+      }
+    };
+  }
+
+  restoreBackup(
+    backup: BackupPackage,
+    options: ImportOptions = {},
+    existingNotes: Note[] = []
+  ): {
+    result: ImportResult;
+    notesToCreate: CreateNoteOptions[];
+    notesToUpdate: { id: string; options: CreateNoteOptions }[];
+    historyToRestore: RecentVisit[];
+  } {
+    const notesData = backup.notes || [];
+    const jsonString = JSON.stringify({ notes: notesData, version: backup.version });
+
+    const { result, notesToCreate, notesToUpdate } = this.importFromJSON(
+      jsonString,
+      options,
+      existingNotes
+    );
+
+    const historyToRestore: RecentVisit[] = [];
+    if (backup.history && options.keepMetadata !== false) {
+      const validNoteIds = new Set([
+        ...result.importedNoteIds,
+        ...existingNotes.map(n => n.id)
+      ]);
+      for (const visit of backup.history) {
+        if (validNoteIds.has(visit.noteId)) {
+          historyToRestore.push({ ...visit });
+        }
+      }
+    }
+
+    return { result, notesToCreate, notesToUpdate, historyToRestore };
+  }
+
+  previewImportJSON(
+    jsonString: string,
+    options: ImportOptions = {},
+    existingNotes: Note[] = []
+  ): ImportPreview {
+    const data = JSON.parse(jsonString);
+    const notesData = Array.isArray(data) ? data : (data.notes || []);
+
+    return this.buildPreview(notesData, options, existingNotes);
+  }
+
+  previewImportMarkdown(
+    markdownFiles: { filename: string; content: string }[],
+    options: ImportOptions = {},
+    existingNotes: Note[] = []
+  ): ImportPreview {
+    const parsedNotes: Note[] = [];
+    for (const file of markdownFiles) {
+      try {
+        parsedNotes.push(this.parseMarkdownNote(file.filename, file.content, options));
+      } catch {
+      }
+    }
+    return this.buildPreview(parsedNotes, options, existingNotes);
+  }
+
+  previewRestoreBackup(
+    backup: BackupPackage,
+    options: ImportOptions = {},
+    existingNotes: Note[] = []
+  ): ImportPreview {
+    return this.buildPreview(backup.notes || [], options, existingNotes);
+  }
+
+  private buildPreview(
+    notesData: any[],
+    options: ImportOptions,
+    existingNotes: Note[]
+  ): ImportPreview {
+    const items: ImportPreviewItem[] = [];
+    const summary = {
+      total: notesData.length,
+      toCreate: 0,
+      toSkip: 0,
+      toOverwrite: 0,
+      toRename: 0
+    };
+
+    const conflictStrategy: ImportConflictStrategy = options.conflictStrategy || 'skip';
+
+    for (const noteData of notesData) {
+      const title = noteData.title || '未命名笔记';
+      const normalizedTitle = title.toLowerCase().trim();
+      const existingNote = existingNotes.find(
+        n => n.title.toLowerCase().trim() === normalizedTitle
+      );
+
+      let action: ImportPreviewItem['action'] = 'create';
+      let existingId: string | undefined;
+      let newTitle: string | undefined;
+
+      if (existingNote) {
+        existingId = existingNote.id;
+        switch (conflictStrategy) {
+          case 'skip':
+            action = 'skip';
+            summary.toSkip++;
+            break;
+          case 'overwrite':
+            action = 'overwrite';
+            summary.toOverwrite++;
+            break;
+          case 'rename':
+            action = 'rename';
+            newTitle = this.generateUniqueTitle(title, existingNotes);
+            summary.toRename++;
+            break;
+        }
+      } else {
+        summary.toCreate++;
+      }
+
+      items.push({
+        title,
+        action,
+        existingId,
+        newTitle,
+        hasAttachments: (noteData.attachments?.length || 0) > 0,
+        isFavorite: !!noteData.isFavorite,
+        tagCount: (noteData.tags?.length || 0),
+        createdAt: noteData.createdAt,
+        updatedAt: noteData.updatedAt
+      });
+    }
+
+    return { items, summary, options };
   }
 
   clear(): void {

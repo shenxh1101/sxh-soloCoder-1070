@@ -665,6 +665,292 @@ test('30. 数据持久化 - toJSON和fromJSON', () => {
   assertEqual(restoredNote.tags[0], 'tag1', '标签应该恢复');
 });
 
+test('31. 导入导出完整性 - JSON往返保留所有元数据', () => {
+  const lib1 = new KnowledgeLibrary();
+  const createdAt = Date.now() - 86400000;
+  const updatedAt = Date.now() - 3600000;
+
+  const { note: n1 } = lib1.notes.create({
+    title: '完整元数据测试',
+    content: '测试内容 [[另一篇]]',
+    tags: ['重要', '测试'],
+    isFavorite: true,
+    summary: '自定义摘要',
+    attachments: [
+      { name: 'file.pdf', type: 'application/pdf', size: 1024, path: '/files/file.pdf' }
+    ],
+    metadata: { priority: 'high', author: 'test' },
+    createdAt,
+    updatedAt
+  });
+
+  const jsonStr = lib1.io.export({ format: 'json', includeAttachments: true }) as string;
+
+  const lib2 = new KnowledgeLibrary();
+  const result = lib2.io.importJSON(jsonStr, { conflictStrategy: 'overwrite', keepMetadata: true });
+
+  assertEqual(result.importedNotes.length, 1, '应该导入1篇');
+  const importedNote = result.importedNotes[0];
+
+  assertEqual(importedNote.title, '完整元数据测试', '标题应该保留');
+  assertEqual(importedNote.tags.length, 2, '标签应该保留');
+  assertEqual(importedNote.tags[0], '重要', '标签内容应该保留');
+  assertEqual(importedNote.isFavorite, true, '收藏应该保留');
+  assertEqual(importedNote.summary, '自定义摘要', '摘要应该保留');
+  assertEqual(importedNote.attachments.length, 1, '附件应该保留');
+  assertEqual(importedNote.attachments[0].name, 'file.pdf', '附件名应该保留');
+  assertEqual((importedNote.metadata as any)?.priority, 'high', '自定义信息应该保留');
+  assertEqual(importedNote.createdAt, createdAt, '创建时间应该保留');
+  assertEqual(importedNote.updatedAt, updatedAt, '更新时间应该保留');
+
+  const queried = lib2.notes.get(importedNote.id)!;
+  assertEqual(queried.title, '完整元数据测试', '查询应该能找到');
+  assertEqual(queried.isFavorite, true, '查询的收藏状态应该正确');
+});
+
+test('32. 备份包 - 创建和恢复', () => {
+  const lib1 = new KnowledgeLibrary();
+
+  const { note: n1 } = lib1.notes.create({ title: '备份笔记1', content: '内容1', tags: ['tag1'], isFavorite: true });
+  const { note: n2 } = lib1.notes.create({ title: '备份笔记2', content: '引用 [[备份笔记1]]', tags: ['tag2'] });
+
+  lib1.notes.get(n1.id);
+  lib1.notes.get(n2.id);
+  lib1.notes.get(n1.id);
+
+  const backup = lib1.io.createBackup({ includeAttachments: true, includeHistory: true });
+
+  assertEqual(backup.version, '1.0.0', '备份版本应该正确');
+  assertEqual(backup.notes.length, 2, '应该包含2篇笔记');
+  assert(backup.history.length >= 2, '应该包含访问历史');
+  assertEqual(backup.stats.noteCount, 2, '统计应该正确');
+  assert(backup.exportedAt > 0, '应该有导出时间');
+
+  const lib2 = new KnowledgeLibrary();
+  const result = lib2.io.restoreBackup(backup, { keepMetadata: true });
+
+  assertEqual(result.importedNotes.length, 2, '应该恢复2篇');
+  assertEqual(lib2.notes.getCount(), 2, '总笔记数应该为2');
+  assert(lib2.history.getVisitCount(n1.id) >= 2, '历史记录应该恢复');
+
+  const restored = lib2.notes.getByTitle('备份笔记1');
+  assert(restored !== null, '应该能按标题找到');
+  assertEqual(restored!.isFavorite, true, '收藏应该恢复');
+});
+
+test('33. 导入预览 - JSON导入预览', () => {
+  const lib = new KnowledgeLibrary();
+  lib.notes.create({ title: '已存在', content: '旧内容', tags: ['old'] });
+
+  const importData = {
+    version: '1.0.0',
+    notes: [
+      { title: '已存在', content: '新内容', tags: ['new'] },
+      { title: '新增笔记', content: '新的内容' }
+    ]
+  };
+
+  const preview = lib.io.previewImportJSON(JSON.stringify(importData), { conflictStrategy: 'overwrite' });
+
+  assertEqual(preview.items.length, 2, '应该预览2条');
+  assertEqual(preview.summary.total, 2, '总数应该正确');
+  assertEqual(preview.summary.toOverwrite, 1, '应该有1条覆盖');
+  assertEqual(preview.summary.toCreate, 1, '应该有1条新增');
+
+  const overwriteItem = preview.items.find(i => i.action === 'overwrite')!;
+  assert(overwriteItem.existingId !== undefined, '应该有现有ID');
+
+  const createItem = preview.items.find(i => i.action === 'create')!;
+  assertEqual(createItem.title, '新增笔记', '应该显示新增标题');
+});
+
+test('34. 导入预览 - Markdown导入预览', () => {
+  const lib = new KnowledgeLibrary();
+  lib.notes.create({ title: '冲突笔记', content: '已有内容' });
+
+  const mdFiles = [
+    { filename: '冲突笔记.md', content: '# 冲突笔记\n\n新内容' },
+    { filename: '全新笔记.md', content: '# 全新笔记\n\n全新内容' }
+  ];
+
+  const preview = lib.io.previewImportMarkdown(mdFiles, { conflictStrategy: 'skip' });
+
+  assertEqual(preview.summary.toSkip, 1, '应该有1条跳过');
+  assertEqual(preview.summary.toCreate, 1, '应该有1条新增');
+});
+
+test('35. 关系图筛选 - 按标签和收藏筛选', () => {
+  const lib = new KnowledgeLibrary();
+
+  const { note: n1 } = lib.notes.create({ title: '技术文档', content: '[[API参考]]', tags: ['技术', '重要'], isFavorite: true });
+  const { note: n2 } = lib.notes.create({ title: 'API参考', content: '内容', tags: ['技术'] });
+  const { note: n3 } = lib.notes.create({ title: '生活记录', content: '内容', tags: ['生活'], isFavorite: true });
+  const { note: n4 } = lib.notes.create({ title: '随笔', content: '内容' });
+
+  const techGraph = lib.relations.getFilteredGraph({ tagFilters: ['技术'] });
+  assertEqual(techGraph.nodes.length, 2, '技术标签图应该有2个节点');
+
+  const favGraph = lib.relations.getFilteredGraph({ isFavorite: true });
+  assertEqual(favGraph.nodes.length, 2, '收藏图应该有2个节点');
+
+  const techFavGraph = lib.relations.getFilteredGraph({ tagFilters: ['技术'], isFavorite: true });
+  assertEqual(techFavGraph.nodes.length, 1, '技术+收藏应该有1个节点');
+  assertEqual(techFavGraph.nodes[0].title, '技术文档', '应该是技术文档');
+});
+
+test('36. 图分析 - 孤立节点、断链节点、中心节点', () => {
+  const lib = new KnowledgeLibrary();
+
+  const { note: center } = lib.notes.create({ title: '中心节点', content: '[[叶子1]] [[叶子2]] [[叶子3]]' });
+  const { note: leaf1 } = lib.notes.create({ title: '叶子1', content: '[[中心节点]]' });
+  const { note: leaf2 } = lib.notes.create({ title: '叶子2', content: '[[中心节点]]' });
+  const { note: leaf3 } = lib.notes.create({ title: '叶子3', content: '内容' });
+  const { note: orphan } = lib.notes.create({ title: '孤立节点', content: '没有链接' });
+  const { note: broken } = lib.notes.create({ title: '断链节点', content: '[[不存在的笔记]]' });
+
+  const analysis = lib.relations.analyzeGraph();
+
+  assertEqual(analysis.stats.totalNodes, 6, '总节点数应该是6');
+  assert(analysis.stats.totalEdges >= 4, '总边数应该>=4');
+
+  assertEqual(analysis.orphanNodes.length, 1, '应该有1个孤立节点');
+  assertEqual(analysis.orphanNodes[0].title, '孤立节点', '孤立节点应该正确');
+
+  assertEqual(analysis.brokenLinkNodes.length, 1, '应该有1个断链节点');
+  assertEqual(analysis.brokenLinkNodes[0].note.title, '断链节点', '断链节点应该正确');
+
+  assertEqual(analysis.centralNodes.length >= 1, true, '应该有中心节点');
+  assertEqual(analysis.centralNodes[0].note.title, '中心节点', '第一个中心节点应该是中心节点');
+  assert(analysis.centralNodes[0].centrality > 0, '中心性应该大于0');
+});
+
+test('37. 搜索增强 - 分页和游标', () => {
+  const lib = new KnowledgeLibrary();
+
+  for (let i = 1; i <= 15; i++) {
+    lib.notes.create({ title: `笔记${i}`, content: `包含关键词的内容 ${i}` });
+  }
+
+  const page1 = lib.search.queryPaginated({ query: '关键词', limit: 5 });
+  assertEqual(page1.results.length, 5, '第一页应该有5条');
+  assertEqual(page1.total, 15, '总数应该是15');
+  assertEqual(page1.hasMore, true, '应该有更多');
+  assert(page1.cursor.cacheKey !== undefined, '应该有游标');
+
+  const page2 = lib.search.continueSearch(page1.cursor.cacheKey);
+  assert(page2 !== null, '应该能继续分页');
+  assertEqual(page2!.results.length, 5, '第二页应该有5条');
+  assertEqual(page2!.cursor.offset, 10, '下一页偏移应该是10');
+
+  const page3 = lib.search.continueSearch(page2!.cursor.cacheKey);
+  assert(page3 !== null, '应该能继续分页');
+  assertEqual(page3!.results.length, 5, '第三页应该有5条');
+  assertEqual(page3!.hasMore, false, '第三页应该没有更多');
+});
+
+test('38. 搜索增强 - 高亮文本和字段信息', () => {
+  const lib = new KnowledgeLibrary();
+
+  lib.notes.create({ title: 'JavaScript入门', content: 'JavaScript是一种编程语言', tags: ['javascript', '编程'] });
+
+  const results = lib.search.queryEnhanced({ query: 'JavaScript' });
+
+  assert(results.length > 0, '应该有搜索结果');
+  assert(results[0].matches.length > 0, '应该有匹配');
+
+  const titleMatch = results[0].matches.find(m => m.field === 'title');
+  assert(titleMatch !== undefined, '应该有标题匹配');
+  assert(titleMatch!.highlightedText.includes('<mark>'), '标题应该有高亮');
+  assert(titleMatch!.matchedText.toLowerCase().includes('javascript'), '应该匹配正确的文本');
+
+  const contentMatch = results[0].matches.find(m => m.field === 'content');
+  assert(contentMatch !== undefined, '应该有内容匹配');
+  assertEqual(contentMatch!.field, 'content', '字段应该正确');
+  assert(contentMatch!.snippet !== undefined, '应该有片段');
+});
+
+test('39. 搜索筛选条件 - 保存、使用、热度统计', () => {
+  const lib = new KnowledgeLibrary();
+
+  lib.notes.create({ title: '技术笔记1', content: '内容', tags: ['技术'] });
+  lib.notes.create({ title: '技术笔记2', content: '内容', tags: ['技术'] });
+  lib.notes.create({ title: '生活笔记', content: '内容', tags: ['生活'] });
+
+  const filter1 = lib.search.saveFilter('技术收藏', {
+    query: '',
+    tagFilters: ['技术'],
+    isFavorite: false,
+    sortBy: 'updatedAt',
+    sortOrder: 'desc'
+  });
+
+  assertEqual(filter1.name, '技术收藏', '名称应该正确');
+  assertEqual(filter1.options.tagFilters?.[0], '技术', '筛选条件应该正确');
+  assertEqual(filter1.useCount, 0, '使用次数应该是0');
+
+  const allFilters = lib.search.getSavedFilters();
+  assertEqual(allFilters.length, 1, '应该有1个已保存筛选');
+
+  const results1 = lib.search.queryWithFilter(filter1.id);
+  assert(results1 !== null, '使用筛选应该返回结果');
+  assertEqual(results1!.length, 2, '应该返回2篇技术笔记');
+
+  const results2 = lib.search.queryWithFilter(filter1.id, { isFavorite: true });
+  assert(results2 !== null, '覆盖选项应该有效');
+  assertEqual(results2!.length, 0, '覆盖收藏筛选后应该0条');
+
+  const updatedFilter = lib.search.getSavedFilter(filter1.id);
+  assert(updatedFilter !== undefined, '应该能获取筛选');
+  assertEqual(updatedFilter!.useCount, 2, '使用次数应该是2');
+
+  const popular = lib.search.getPopularFilters(5);
+  assertEqual(popular.length, 1, '热门筛选应该有1个');
+  assertEqual(popular[0].useCount, 2, '热门筛选使用次数应该正确');
+
+  const deleted = lib.search.deleteFilter(filter1.id);
+  assertEqual(deleted, true, '删除应该成功');
+  assertEqual(lib.search.getSavedFilters().length, 0, '删除后应该为空');
+});
+
+test('40. 导入覆盖时附件同步更新', () => {
+  const lib = new KnowledgeLibrary();
+
+  const { note: original } = lib.notes.create({
+    title: '附件测试',
+    content: '内容',
+    attachments: [
+      { name: 'old.pdf', type: 'application/pdf', size: 1000, path: '/old.pdf' }
+    ]
+  });
+
+  assertEqual(original.attachments.length, 1, '初始附件1个');
+
+  const updatedData = {
+    version: '1.0.0',
+    notes: [{
+      title: '附件测试',
+      content: '更新后的内容',
+      attachments: [
+        { id: 'new1', name: 'new.pdf', type: 'application/pdf', size: 2000, path: '/new.pdf' },
+        { id: 'new2', name: 'image.png', type: 'image/png', size: 500, path: '/image.png' }
+      ]
+    }]
+  };
+
+  const result = lib.io.importJSON(JSON.stringify(updatedData), {
+    conflictStrategy: 'overwrite',
+    keepMetadata: true
+  });
+
+  assertEqual(result.overwrittenCount, 1, '应该覆盖1篇');
+
+  const updatedNote = lib.notes.get(original.id)!;
+  assertEqual(updatedNote.attachments.length, 2, '附件应该更新为2个');
+  assertEqual(updatedNote.attachments[0].name, 'new.pdf', '第一个附件应该是new.pdf');
+  assertEqual(updatedNote.attachments[1].name, 'image.png', '第二个附件应该是image.png');
+  assertEqual(updatedNote.content, '更新后的内容', '内容应该更新');
+});
+
 console.log(`\n=== 测试结果 ===`);
 console.log(`通过: ${passed}, 失败: ${failed}`);
 

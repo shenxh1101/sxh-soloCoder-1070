@@ -19,12 +19,13 @@ export class NoteManager {
       id,
       title: options.title.trim(),
       content: options.content || '',
+      summary: options.summary,
       tags: normalizeTags(options.tags || []),
       isFavorite: options.isFavorite || false,
       attachments,
       outLinks: [],
-      createdAt: now,
-      updatedAt: now,
+      createdAt: options.createdAt || now,
+      updatedAt: options.updatedAt || now,
       metadata: options.metadata || {}
     };
 
@@ -54,14 +55,27 @@ export class NoteManager {
     const note = this.notes.get(id);
     if (!note) return undefined;
 
+    let attachments = note.attachments;
+    if (options.attachments !== undefined) {
+      const now = getCurrentTimestamp();
+      attachments = options.attachments.map(att => ({
+        ...att,
+        id: generateAttachmentId(),
+        noteId: id,
+        createdAt: now
+      }));
+    }
+
     const updatedNote: Note = {
       ...note,
       title: options.title !== undefined ? options.title.trim() : note.title,
       content: options.content !== undefined ? options.content : note.content,
+      summary: options.summary !== undefined ? options.summary : note.summary,
       tags: options.tags !== undefined ? normalizeTags(options.tags) : note.tags,
       isFavorite: options.isFavorite !== undefined ? options.isFavorite : note.isFavorite,
+      attachments,
       metadata: options.metadata !== undefined ? { ...note.metadata, ...options.metadata } : note.metadata,
-      updatedAt: getCurrentTimestamp()
+      updatedAt: options.updatedAt || getCurrentTimestamp()
     };
 
     this.notes.set(id, updatedNote);
@@ -74,8 +88,7 @@ export class NoteManager {
 
     const updatedNote: Note = {
       ...note,
-      outLinks: links,
-      updatedAt: getCurrentTimestamp()
+      outLinks: links
     };
 
     this.notes.set(id, updatedNote);
@@ -88,8 +101,7 @@ export class NoteManager {
 
     const updatedNote: Note = {
       ...note,
-      summary,
-      updatedAt: getCurrentTimestamp()
+      summary
     };
 
     this.notes.set(id, updatedNote);

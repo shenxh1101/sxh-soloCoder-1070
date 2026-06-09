@@ -270,6 +270,11 @@ export interface SavedSearchFilter {
   createdAt: number;
   usedAt: number;
   useCount: number;
+  lastResultCount?: number;
+  recentRuns?: {
+    resultCount: number;
+    executedAt: number;
+  }[];
 }
 
 export interface SearchCursor {
@@ -305,4 +310,110 @@ export interface EnhancedSearchResult {
   bestMatch: EnhancedSearchMatch;
   bestSnippet: string;
   highlightedTitle?: string;
+}
+
+export interface SearchFacetStats {
+  tagDistribution: {
+    tag: string;
+    count: number;
+    percentage: number;
+  }[];
+  attachmentTypeDistribution: {
+    type: string;
+    count: number;
+    percentage: number;
+  }[];
+  favoriteStats: {
+    favorite: number;
+    nonFavorite: number;
+    favoritePercentage: number;
+  };
+  dateBuckets: {
+    bucket: string;
+    start: number;
+    end: number;
+    count: number;
+  }[];
+  totalMatching: number;
+}
+
+export interface SearchWithFacetsResult {
+  results: SearchResult[];
+  facets: SearchFacetStats;
+  cursor?: SearchCursor;
+  total: number;
+}
+
+export interface ImportPreviewItemDetail {
+  title: string;
+  action: 'create' | 'skip' | 'overwrite' | 'rename';
+  existingId?: string;
+  newTitle?: string;
+  hasAttachments: boolean;
+  isFavorite: boolean;
+  tagCount: number;
+  createdAt?: number;
+  updatedAt?: number;
+  migrationPlan: {
+    attachments: {
+      willImport: boolean;
+      count: number;
+      types: string[];
+    };
+    metadata: {
+      willImport: boolean;
+      keys: string[];
+    };
+    history: {
+      willImport: boolean;
+      visitCount: number;
+    };
+    tags: {
+      willImport: boolean;
+      tags: string[];
+    };
+    timestamps: {
+      willKeepCreated: boolean;
+      willKeepUpdated: boolean;
+      originalCreatedAt?: number;
+      originalUpdatedAt?: number;
+    };
+    summary: {
+      willImport: boolean;
+      hasCustomSummary: boolean;
+    };
+    favorite: {
+      willImport: boolean;
+      isFavorite: boolean;
+    };
+  };
+  existingNote?: {
+    id: string;
+    title: string;
+    attachmentCount: number;
+    tagCount: number;
+    hasCustomSummary: boolean;
+    isFavorite: boolean;
+    metadataKeys: string[];
+  };
+}
+
+export interface ImportAuditReport {
+  items: ImportPreviewItemDetail[];
+  summary: {
+    total: number;
+    toCreate: number;
+    toSkip: number;
+    toOverwrite: number;
+    toRename: number;
+    totalAttachmentsToImport: number;
+    totalMetadataKeys: number;
+    totalHistoryRecords: number;
+  };
+  options: ImportOptions;
+  warnings: {
+    type: string;
+    message: string;
+    itemIndex?: number;
+  }[];
 }

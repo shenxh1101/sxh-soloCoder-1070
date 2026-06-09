@@ -10,7 +10,9 @@ import type {
   BackupPackage,
   ImportPreview,
   ImportPreviewItem,
-  RecentVisit
+  RecentVisit,
+  ImportAuditReport,
+  ImportPreviewItemDetail
 } from '../types';
 import {
   generateId,
@@ -812,6 +814,277 @@ export class ImportExportManager {
     }
 
     return { items, summary, options };
+  }
+
+  auditImportJSON(
+    jsonString: string,
+    options: ImportOptions = {},
+    existingNotes: Note[] = [],
+    existingHistory: RecentVisit[] = []
+  ): ImportAuditReport {
+    try {
+      const data = JSON.parse(jsonString);
+      const notesData = Array.isArray(data) ? data : (data.notes || []);
+      return this.buildAuditReport(notesData, options, existingNotes, existingHistory);
+    } catch (error) {
+      return {
+        items: [],
+        summary: {
+          total: 0,
+          toCreate: 0,
+          toSkip: 0,
+          toOverwrite: 0,
+          toRename: 0,
+          totalAttachmentsToImport: 0,
+          totalMetadataKeys: 0,
+          totalHistoryRecords: 0
+        },
+        options,
+        warnings: [{
+          type: 'parse_error',
+          message: `JSON 解析失败: ${error instanceof Error ? error.message : '未知错误'}`
+        }]
+      };
+    }
+  }
+
+  auditImportMarkdown(
+    markdownFiles: { filename: string; content: string }[],
+    options: ImportOptions = {},
+    existingNotes: Note[] = [],
+    existingHistory: RecentVisit[] = []
+  ): ImportAuditReport {
+    const parsedNotes: Note[] = [];
+    const warnings: ImportAuditReport['warnings'] = [];
+
+    for (let i = 0; i < markdownFiles.length; i++) {
+      try {
+        const file = markdownFiles[i];
+        parsedNotes.push(this.parseMarkdownNote(file.filename, file.content, options));
+      } catch (error) {
+        warnings.push({
+          type: 'parse_error',
+          message: `解析失败: ${markdownFiles[i].filename} - ${error instanceof Error ? error.message : '未知错误'}`,
+          itemIndex: i
+        });
+      }
+    }
+
+    return this.buildAuditReport(parsedNotes, options, existingNotes, existingHistory, warnings);
+  }
+
+  auditRestoreBackup(
+    backup: BackupPackage,
+    options: ImportOptions = {},
+    existingNotes: Note[] = [],
+    existingHistory: RecentVisit[] = []
+  ): ImportAuditReport {
+    return this.buildAuditReport(
+      backup.notes || [],
+      options,
+      existingNotes,
+      existingHistory,
+      [],
+      backup.history || []
+    );
+  }
+
+  private buildAuditReport(
+    notesData: any[],
+    options: ImportOptions,
+    existingNotes: Note[],
+    existingHistory: RecentVisit[],
+    initialWarnings: ImportAuditReport['warnings'] = [],
+    backupHistory: RecentVisit[] = []
+  ): ImportAuditReport {
+    const items: ImportPreviewItemDetail[] = [];
+    const warnings = [...initialWarnings];
+    const summary = {
+      total: notesData.length,
+      toCreate: 0,
+      toSkip: 0,
+      toOverwrite: 0,
+      toRename: 0,
+      totalAttachmentsToImport: 0,
+      totalMetadataKeys: 0,
+      totalHistoryRecords: 0
+    };
+
+    const conflictStrategy: ImportConflictStrategy = options.conflictStrategy || 'skip';
+    const usedTitles = new Set<string>();
+
+    const noteIdsFromData = new Set<string>();
+    for (const noteData of notesData) {
+      if (noteData.id) {
+        noteIdsFromData.add(noteData.id);
+      }
+    }
+
+    let totalAttachments = 0;
+    let totalMetadataKeys = 0;
+    let totalHistoryRecords = 0;
+
+    for (let i = 0; i < notesData.length; i++) {
+      const noteData = notesData[i];
+      const title = noteData.title || '未命名笔记';
+      const normalizedTitle = title.toLowerCase().trim();
+      const existingNote = existingNotes.find(
+        n => n.title.toLowerCase().trim() === normalizedTitle
+      );
+
+      let action: ImportPreviewItemDetail['action'] = 'create';
+      let existingId: string | undefined;
+      let newTitle: string | undefined;
+
+      if (existingNote) {
+        existingId = existingNote.id;
+        switch (conflictStrategy) {
+          case 'skip':
+            action = 'skip';
+            summary.toSkip++;
+            break;
+          case 'overwrite':
+            action = 'overwrite';
+            summary.toOverwrite++;
+            break;
+          case 'rename':
+            action = 'rename';
+            newTitle = this.generateUniqueTitle(title, existingNotes, usedTitles);
+            usedTitles.add(newTitle.toLowerCase());
+            summary.toRename++;
+            break;
+        }
+      } else {
+        if (usedTitles.has(normalizedTitle)) {
+          action = 'rename';
+          newTitle = this.generateUniqueTitle(title, existingNotes, usedTitles);
+          usedTitles.add(newTitle.toLowerCase());
+          summary.toRename++;
+          warnings.push({
+            type: 'rename_notice',
+            message: `笔记"${title}"在导入批次内重名，将重命名为"${newTitle}"`,
+            itemIndex: i
+          });
+        } else {
+          usedTitles.add(normalizedTitle);
+          summary.toCreate++;
+        }
+      }
+
+      const attachments = noteData.attachments || [];
+      const metadata = noteData.metadata || {};
+      const metadataKeys = Object.keys(metadata);
+      const tags = noteData.tags || [];
+
+      const willImportAttachments = options.keepAttachments !== false && attachments.length > 0;
+      const willImportMetadata = options.keepMetadata !== false && metadataKeys.length > 0;
+      const willImportTags = options.keepTags !== false && tags.length > 0;
+      const willImportSummary = options.keepSummary !== false && !!noteData.summary;
+      const willImportFavorite = options.keepFavorites !== false && !!noteData.isFavorite;
+      const willKeepCreatedAt = options.keepCreationTime !== false && !!noteData.createdAt;
+      const willKeepUpdatedAt = options.keepUpdateTime !== false && !!noteData.updatedAt;
+
+      if (willImportAttachments) {
+        totalAttachments += attachments.length;
+      }
+      if (willImportMetadata) {
+        totalMetadataKeys += metadataKeys.length;
+      }
+
+      let visitCount = 0;
+      if (noteData.id) {
+        visitCount = backupHistory.filter(h => h.noteId === noteData.id).length;
+      }
+
+      if (options.keepMetadata !== false && visitCount > 0) {
+        totalHistoryRecords += visitCount;
+      }
+
+      const attachmentTypes = [...new Set(
+        attachments.map((a: Attachment) => String(a.type || a.name.split('.').pop() || 'unknown'))
+      )] as string[];
+
+      const migrationPlan: ImportPreviewItemDetail['migrationPlan'] = {
+        attachments: {
+          willImport: willImportAttachments,
+          count: attachments.length,
+          types: attachmentTypes
+        },
+        metadata: {
+          willImport: willImportMetadata,
+          keys: metadataKeys
+        },
+        history: {
+          willImport: options.keepMetadata !== false && visitCount > 0,
+          visitCount
+        },
+        tags: {
+          willImport: willImportTags,
+          tags
+        },
+        timestamps: {
+          willKeepCreated: willKeepCreatedAt,
+          willKeepUpdated: willKeepUpdatedAt,
+          originalCreatedAt: noteData.createdAt,
+          originalUpdatedAt: noteData.updatedAt
+        },
+        summary: {
+          willImport: willImportSummary,
+          hasCustomSummary: !!noteData.summary
+        },
+        favorite: {
+          willImport: willImportFavorite,
+          isFavorite: !!noteData.isFavorite
+        }
+      };
+
+      let existingNoteDetail: ImportPreviewItemDetail['existingNote'] | undefined;
+      if (existingNote) {
+        existingNoteDetail = {
+          id: existingNote.id,
+          title: existingNote.title,
+          attachmentCount: existingNote.attachments.length,
+          tagCount: existingNote.tags.length,
+          hasCustomSummary: !!existingNote.summary,
+          isFavorite: existingNote.isFavorite,
+          metadataKeys: Object.keys(existingNote.metadata || {})
+        };
+      }
+
+      items.push({
+        title,
+        action,
+        existingId,
+        newTitle,
+        hasAttachments: attachments.length > 0,
+        isFavorite: !!noteData.isFavorite,
+        tagCount: tags.length,
+        createdAt: noteData.createdAt,
+        updatedAt: noteData.updatedAt,
+        migrationPlan,
+        existingNote: existingNoteDetail
+      });
+    }
+
+    summary.totalAttachmentsToImport = totalAttachments;
+    summary.totalMetadataKeys = totalMetadataKeys;
+    summary.totalHistoryRecords = totalHistoryRecords;
+
+    if (backupHistory.length > 0 && options.keepMetadata === false) {
+      warnings.push({
+        type: 'history_skipped',
+        message: 'keepMetadata 设置为 false，访问历史记录将不会被导入'
+      });
+    }
+
+    if (conflictStrategy === 'overwrite' && summary.toOverwrite > 0) {
+      warnings.push({
+        type: 'overwrite_warning',
+        message: `将覆盖 ${summary.toOverwrite} 篇现有笔记，覆盖操作不可恢复`
+      });
+    }
+
+    return { items, summary, options, warnings };
   }
 
   clear(): void {

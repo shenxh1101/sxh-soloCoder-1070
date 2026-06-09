@@ -7,7 +7,9 @@ import type {
   SearchCursor,
   PaginatedSearchResult,
   EnhancedSearchMatch,
-  EnhancedSearchResult
+  EnhancedSearchResult,
+  SearchFacetStats,
+  SearchWithFacetsResult
 } from '../types';
 import {
   escapeRegExp,
@@ -82,13 +84,15 @@ export class SearchEngine {
       dateField = 'updatedAt',
       sortBy = 'score',
       sortOrder = 'desc',
-      limit = 50,
+      limit: inputLimit = 50,
       offset = 0,
       caseSensitive = false,
       enableHighlight = false,
       enableSnippet = true,
       snippetLength = 150
     } = options;
+
+    const limit = inputLimit === undefined || inputLimit === null ? Infinity : inputLimit;
 
     if (!query.trim() && tagFilters.length === 0 && isFavorite === undefined && 
         hasAttachments === undefined && attachmentTypes.length === 0 && 
@@ -466,6 +470,138 @@ export class SearchEngine {
     };
   }
 
+  calculateFacets(notes: Note[], dateField: 'createdAt' | 'updatedAt' | 'lastVisitedAt' = 'updatedAt'): SearchFacetStats {
+    const totalMatching = notes.length;
+
+    const tagCount = new Map<string, number>();
+    const attachmentTypeCount = new Map<string, number>();
+    let favoriteCount = 0;
+    const dateBuckets = new Map<string, { bucket: string; start: number; end: number; count: number }>();
+
+    for (const note of notes) {
+      for (const tag of note.tags) {
+        tagCount.set(tag, (tagCount.get(tag) || 0) + 1);
+      }
+
+      for (const att of note.attachments) {
+        const type = att.type || att.name.split('.').pop() || 'unknown';
+        attachmentTypeCount.set(type, (attachmentTypeCount.get(type) || 0) + 1);
+      }
+
+      if (note.isFavorite) {
+        favoriteCount++;
+      }
+
+      const dateValue = note[dateField];
+      if (dateValue) {
+        const bucketKey = this.getDateBucketKey(dateValue);
+        if (!dateBuckets.has(bucketKey)) {
+          const bucket = this.getDateBucketRange(dateValue);
+          dateBuckets.set(bucketKey, { ...bucket, count: 0 });
+        }
+        dateBuckets.get(bucketKey)!.count++;
+      }
+    }
+
+    const tagDistribution = Array.from(tagCount.entries())
+      .map(([tag, count]) => ({
+        tag,
+        count,
+        percentage: totalMatching > 0 ? Math.round((count / totalMatching) * 10000) / 100 : 0
+      }))
+      .sort((a, b) => b.count - a.count);
+
+    const attachmentTypeDistribution = Array.from(attachmentTypeCount.entries())
+      .map(([type, count]) => ({
+        type,
+        count,
+        percentage: totalMatching > 0 ? Math.round((count / totalMatching) * 10000) / 100 : 0
+      }))
+      .sort((a, b) => b.count - a.count);
+
+    const sortedBuckets = Array.from(dateBuckets.values())
+      .sort((a, b) => a.start - b.start);
+
+    return {
+      tagDistribution,
+      attachmentTypeDistribution,
+      favoriteStats: {
+        favorite: favoriteCount,
+        nonFavorite: totalMatching - favoriteCount,
+        favoritePercentage: totalMatching > 0 ? Math.round((favoriteCount / totalMatching) * 10000) / 100 : 0
+      },
+      dateBuckets: sortedBuckets,
+      totalMatching
+    };
+  }
+
+  private getDateBucketKey(timestamp: number): string {
+    const date = new Date(timestamp);
+    const year = date.getFullYear();
+    const month = date.getMonth();
+    return `${year}-${month}`;
+  }
+
+  private getDateBucketRange(timestamp: number): { bucket: string; start: number; end: number } {
+    const date = new Date(timestamp);
+    const year = date.getFullYear();
+    const month = date.getMonth();
+    const start = new Date(year, month, 1).getTime();
+    const end = new Date(year, month + 1, 0, 23, 59, 59, 999).getTime();
+    const monthStr = String(month + 1).padStart(2, '0');
+    return {
+      bucket: `${year}-${monthStr}`,
+      start,
+      end
+    };
+  }
+
+  searchWithFacets(
+    options: SearchOptions,
+    notes: Note[]
+  ): SearchWithFacetsResult {
+    const allResults = this.search({ ...options, limit: undefined, offset: 0 }, notes);
+    const facets = this.calculateFacets(allResults.map(r => r.note), options.dateField || 'updatedAt');
+
+    const { offset = 0, limit = 50 } = options;
+    const paginatedResults = allResults.slice(offset, offset + limit);
+
+    const cacheKey = buildCacheKey(
+      options.query,
+      options.sortBy,
+      options.sortOrder,
+      JSON.stringify(options.tagFilters),
+      options.tagFilterMode,
+      options.isFavorite,
+      options.hasAttachments,
+      JSON.stringify(options.attachmentTypes),
+      options.dateFrom,
+      options.dateTo,
+      options.dateField,
+      options.caseSensitive,
+      limit
+    );
+
+    const cursor: SearchCursor = {
+      offset: offset + limit,
+      total: allResults.length,
+      hasMore: offset + limit < allResults.length,
+      query: options.query,
+      options: { ...options },
+      cacheKey: hashString(cacheKey),
+      expiresAt: Date.now() + this.CURSOR_TTL
+    };
+
+    this.cursorCache.set(cursor.cacheKey, cursor);
+
+    return {
+      results: paginatedResults,
+      facets,
+      cursor,
+      total: allResults.length
+    };
+  }
+
   searchWithPagination(
     options: SearchOptions,
     notes: Note[]
@@ -598,7 +734,9 @@ export class SearchEngine {
       options: { ...options },
       createdAt: Date.now(),
       usedAt: Date.now(),
-      useCount: 0
+      useCount: 0,
+      lastResultCount: 0,
+      recentRuns: []
     };
 
     this.savedFilters.set(filter.id, filter);
@@ -607,19 +745,39 @@ export class SearchEngine {
 
   getSavedFilters(): SavedSearchFilter[] {
     return Array.from(this.savedFilters.values())
-      .sort((a, b) => b.usedAt - a.usedAt);
+      .sort((a, b) => {
+        if (b.usedAt !== a.usedAt) {
+          return b.usedAt - a.usedAt;
+        }
+        return b.createdAt - a.createdAt;
+      });
   }
 
   getSavedFilter(id: string): SavedSearchFilter | undefined {
     return this.savedFilters.get(id);
   }
 
-  useFilter(id: string): SavedSearchFilter | null {
+  useFilter(id: string, resultCount?: number): SavedSearchFilter | null {
     const filter = this.savedFilters.get(id);
     if (!filter) return null;
 
     filter.usedAt = Date.now();
     filter.useCount++;
+    
+    if (resultCount !== undefined) {
+      filter.lastResultCount = resultCount;
+      if (!filter.recentRuns) {
+        filter.recentRuns = [];
+      }
+      filter.recentRuns.unshift({
+        resultCount,
+        executedAt: Date.now()
+      });
+      if (filter.recentRuns.length > 10) {
+        filter.recentRuns = filter.recentRuns.slice(0, 10);
+      }
+    }
+    
     return filter;
   }
 
@@ -638,7 +796,7 @@ export class SearchEngine {
     notes: Note[],
     overrideOptions?: Partial<SearchOptions>
   ): SearchResult[] | null {
-    const filter = this.useFilter(filterId);
+    const filter = this.savedFilters.get(filterId);
     if (!filter) return null;
 
     const mergedOptions: SearchOptions = {
@@ -646,7 +804,23 @@ export class SearchEngine {
       ...overrideOptions
     };
 
-    return this.search(mergedOptions, notes);
+    const results = this.search(mergedOptions, notes);
+    
+    filter.usedAt = Date.now();
+    filter.useCount++;
+    filter.lastResultCount = results.length;
+    if (!filter.recentRuns) {
+      filter.recentRuns = [];
+    }
+    filter.recentRuns.unshift({
+      resultCount: results.length,
+      executedAt: Date.now()
+    });
+    if (filter.recentRuns.length > 10) {
+      filter.recentRuns = filter.recentRuns.slice(0, 10);
+    }
+
+    return results;
   }
 
   private cleanupExpiredCursors(): void {

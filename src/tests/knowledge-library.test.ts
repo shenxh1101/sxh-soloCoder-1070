@@ -1201,6 +1201,414 @@ test('44. 导入预览多个重名笔记重命名不冲突验收', () => {
   assertEqual(foundOriginal!.tags[0], '旧', '原有需求文档标签应该是旧');
 });
 
+test('45. 搜索筛选面板数据 - 标签分布、附件类型、收藏统计、时间分桶', () => {
+  const lib = new KnowledgeLibrary();
+  const now = Date.now();
+  const monthAgo = now - 30 * 24 * 60 * 60 * 1000;
+  const twoMonthsAgo = now - 60 * 24 * 60 * 60 * 1000;
+
+  for (let i = 1; i <= 15; i++) {
+    const tags = i % 3 === 0 ? ['技术', '重要'] : i % 3 === 1 ? ['技术'] : ['产品'];
+    const isFavorite = i % 4 === 0;
+    const createdAt = i <= 5 ? twoMonthsAgo : i <= 10 ? monthAgo : now;
+    
+    lib.notes.create({
+      title: `笔记${i.toString().padStart(2, '0')}`,
+      content: '包含搜索关键词的内容',
+      tags,
+      isFavorite,
+      createdAt,
+      updatedAt: createdAt,
+      attachments: i % 5 === 0 ? [
+        { name: `文档${i}.pdf`, path: `/docs/${i}.pdf`, type: 'pdf', size: 1024 * i }
+      ] : i % 5 === 1 ? [
+        { name: `图片${i}.png`, path: `/imgs/${i}.png`, type: 'png', size: 512 * i }
+      ] : []
+    });
+  }
+
+  const result = lib.search.queryWithFacets({
+    query: '关键词',
+    tagFilters: ['技术'],
+    limit: 5
+  });
+
+  assertEqual(result.total, 10, '技术标签应该匹配10篇');
+  assertEqual(result.results.length, 5, '第一页应该有5条');
+  assert(result.facets !== undefined, '应该返回facets统计');
+
+  const tagDist = result.facets.tagDistribution;
+  assert(tagDist.length >= 2, '标签分布至少有2个');
+  const techTag = tagDist.find(t => t.tag === '技术');
+  const importantTag = tagDist.find(t => t.tag === '重要');
+  assert(techTag !== undefined, '应该有技术标签');
+  assertEqual(techTag!.count, 10, '技术标签应该有10篇');
+  assert(importantTag !== undefined, '应该有重要标签');
+  assertEqual(importantTag!.count, 5, '重要标签应该有5篇');
+
+  const attDist = result.facets.attachmentTypeDistribution;
+  assert(attDist.length >= 2, '附件类型分布至少有2个');
+  const pdfType = attDist.find(a => a.type === 'pdf');
+  const pngType = attDist.find(a => a.type === 'png');
+  assert(pdfType !== undefined, '应该有pdf类型');
+  assert(pngType !== undefined, '应该有png类型');
+
+  const favStats = result.facets.favoriteStats;
+  assertEqual(favStats.favorite + favStats.nonFavorite, 10, '收藏总数应该匹配');
+  assert(favStats.favoritePercentage >= 0, '收藏百分比应该有效');
+
+  const dateBuckets = result.facets.dateBuckets;
+  assert(dateBuckets.length >= 1, '至少有1个时间分桶');
+  assertEqual(result.facets.totalMatching, 10, '总匹配数应该是10');
+
+  const result2 = lib.search.queryWithFacets({
+    query: '关键词',
+    tagFilters: ['技术', '重要'],
+    tagFilterMode: 'all',
+    limit: 10
+  });
+
+  assertEqual(result2.total, 5, '技术+重要应该匹配5篇');
+  assertEqual(result2.facets.tagDistribution.length, 2, '筛选后标签分布应该只有2个');
+  assertEqual(result2.facets.totalMatching, 5, '筛选后总数应该是5');
+});
+
+test('46. 搜索条件保存 - 记录结果数量和最近运行', () => {
+  const lib = new KnowledgeLibrary();
+  
+  for (let i = 1; i <= 20; i++) {
+    lib.notes.create({
+      title: `文档${i}`,
+      content: i <= 10 ? '技术内容' : '产品内容',
+      tags: i <= 10 ? ['技术'] : ['产品']
+    });
+  }
+
+  const saved = lib.search.saveFilter('技术文档', {
+    query: '',
+    tagFilters: ['技术'],
+    sortBy: 'title',
+    sortOrder: 'asc'
+  });
+
+  assertEqual(saved.useCount, 0, '初始使用次数应该是0');
+  assertEqual(saved.lastResultCount, 0, '初始结果数量应该是0');
+  assert(saved.recentRuns !== undefined, '应该有recentRuns字段');
+  assertEqual(saved.recentRuns!.length, 0, '初始recentRuns应该为空');
+
+  const results1 = lib.search.queryWithFilter(saved.id);
+  assert(results1 !== null, '应该能使用保存的筛选');
+  assertEqual(results1!.length, 10, '应该返回10篇技术文档');
+
+  const filterAfterUse = lib.search.getSavedFilter(saved.id);
+  assert(filterAfterUse !== undefined, '应该能获取保存的筛选');
+  assertEqual(filterAfterUse!.useCount, 1, '使用次数应该增加到1');
+  assertEqual(filterAfterUse!.lastResultCount, 10, '应该记录结果数量10');
+  assert(filterAfterUse!.recentRuns !== undefined, '应该有recentRuns');
+  assertEqual(filterAfterUse!.recentRuns!.length, 1, '应该有1次运行记录');
+  assertEqual(filterAfterUse!.recentRuns![0].resultCount, 10, '运行记录结果数量正确');
+  assert(filterAfterUse!.recentRuns![0].executedAt > 0, '应该有执行时间');
+
+  for (let i = 0; i < 5; i++) {
+    lib.search.queryWithFilter(saved.id);
+  }
+
+  const filterAfterMultiple = lib.search.getSavedFilter(saved.id);
+  assert(filterAfterMultiple !== undefined, '应该能获取保存的筛选');
+  assertEqual(filterAfterMultiple!.useCount, 6, '使用次数应该增加到6');
+  assert(filterAfterMultiple!.recentRuns !== undefined, '应该有recentRuns');
+  assertEqual(filterAfterMultiple!.recentRuns!.length, 6, '应该有6次运行记录');
+
+  const wait = Date.now();
+  while (Date.now() - wait < 2) {}
+
+  const saved2 = lib.search.saveFilter('产品文档', {
+    query: '',
+    tagFilters: ['产品']
+  });
+
+  const results2 = lib.search.queryWithFilter(saved2.id);
+  assert(results2 !== null, '产品文档查询应该返回结果');
+  assertEqual(results2!.length, 10, '产品文档应该返回10篇');
+
+  const popularFilters = lib.search.getPopularFilters();
+  assertEqual(popularFilters.length >= 2, true, '至少有2个保存的筛选');
+  assertEqual(popularFilters[0].id, saved.id, '最热门应该是技术文档');
+  assertEqual(popularFilters[1].id, saved2.id, '第二热门应该是产品文档');
+
+  const recentFilters = lib.search.getSavedFilters();
+  assertEqual(recentFilters.length >= 2, true, '至少有2个保存的筛选');
+  assertEqual(recentFilters[0].id, saved2.id, '最近使用应该是产品文档');
+  assertEqual(recentFilters[1].id, saved.id, '第二最近应该是技术文档');
+});
+
+test('47. 迁移导入预检报告 - 详细迁移预览', () => {
+  const lib = new KnowledgeLibrary();
+  
+  lib.notes.create({
+    title: '已存在笔记',
+    content: '原有内容',
+    tags: ['旧标签'],
+    isFavorite: false,
+    attachments: [{ name: 'old.pdf', path: '/old.pdf', type: 'pdf', size: 1000 }],
+    metadata: { oldKey: 'oldValue' }
+  });
+
+  const importData = {
+    version: '1.0.0',
+    notes: [
+      {
+        title: '新增笔记',
+        content: '全新内容',
+        tags: ['技术', '重要'],
+        isFavorite: true,
+        summary: '自定义摘要',
+        createdAt: 1700000000000,
+        updatedAt: 1710000000000,
+        attachments: [
+          { name: 'doc1.pdf', path: '/d1.pdf', type: 'pdf', size: 2048 },
+          { name: 'img1.png', path: '/i1.png', type: 'png', size: 1024 }
+        ],
+        metadata: { priority: 'high', author: '张三' }
+      },
+      {
+        title: '已存在笔记',
+        content: '更新后的内容',
+        tags: ['新标签1', '新标签2'],
+        isFavorite: true,
+        summary: '新的摘要',
+        attachments: [{ name: 'new.pdf', path: '/n.pdf', type: 'pdf', size: 3000 }],
+        metadata: { newKey: 'newValue' }
+      },
+      {
+        title: '新增笔记',
+        content: '另一篇新增',
+        tags: ['产品'],
+        isFavorite: false,
+        attachments: [{ name: 'doc2.pdf', path: '/d2.pdf', type: 'pdf', size: 4096 }],
+        metadata: { category: 'product' }
+      }
+    ]
+  };
+
+  const backup = {
+    version: '1.0.0',
+    exportedAt: Date.now(),
+    libraryVersion: '1.0.0',
+    notes: importData.notes.map((n, idx) => ({
+      ...n,
+      id: `id${idx + 1}`,
+      outLinks: [],
+      createdAt: n.createdAt || Date.now(),
+      updatedAt: n.updatedAt || Date.now(),
+      attachments: n.attachments.map((a, aIdx) => ({
+        ...a,
+        id: `att${idx + 1}-${aIdx + 1}`,
+        noteId: `id${idx + 1}`,
+        createdAt: n.createdAt || Date.now()
+      }))
+    })),
+    attachments: [],
+    history: [
+      { noteId: 'id1', noteTitle: '新增笔记', visitedAt: 1710000000000 },
+      { noteId: 'id1', noteTitle: '新增笔记', visitedAt: 1711000000000 },
+      { noteId: 'id2', noteTitle: '已存在笔记', visitedAt: 1712000000000 }
+    ],
+    stats: { noteCount: 3, attachmentCount: 0, tagCount: 0, historyCount: 3 }
+  };
+
+  const audit1 = lib.io.auditImportJSON(JSON.stringify(importData), {
+    conflictStrategy: 'rename',
+    keepMetadata: true
+  });
+
+  assertEqual(audit1.summary.total, 3, '总共3条');
+  assertEqual(audit1.summary.toCreate, 1, '应该创建1条');
+  assertEqual(audit1.summary.toRename, 2, '应该重命名2条');
+  assertEqual(audit1.summary.totalAttachmentsToImport, 4, '应该导入4个附件');
+  assertEqual(audit1.summary.totalMetadataKeys, 4, '应该导入4个metadata键');
+
+  const createItem = audit1.items.find(i => i.action === 'create')!;
+  assertEqual(createItem.title, '新增笔记', '创建的应该是新增笔记');
+  assert(createItem.migrationPlan !== undefined, '应该有迁移计划');
+  assertEqual(createItem.migrationPlan.attachments.willImport, true, '应该导入附件');
+  assertEqual(createItem.migrationPlan.attachments.count, 2, '应该有2个附件');
+  assertEqual(createItem.migrationPlan.attachments.types.length, 2, '应该有2种附件类型');
+  assert(createItem.migrationPlan.attachments.types.includes('pdf'), '应该包含pdf');
+  assert(createItem.migrationPlan.attachments.types.includes('png'), '应该包含png');
+  assertEqual(createItem.migrationPlan.metadata.willImport, true, '应该导入metadata');
+  assertEqual(createItem.migrationPlan.metadata.keys.length, 2, '应该有2个metadata键');
+  assert(createItem.migrationPlan.metadata.keys.includes('priority'), '应该包含priority');
+  assertEqual(createItem.migrationPlan.tags.willImport, true, '应该导入标签');
+  assertEqual(createItem.migrationPlan.tags.tags.length, 2, '应该有2个标签');
+  assertEqual(createItem.migrationPlan.summary.willImport, true, '应该导入摘要');
+  assertEqual(createItem.migrationPlan.summary.hasCustomSummary, true, '应该有自定义摘要');
+  assertEqual(createItem.migrationPlan.favorite.willImport, true, '应该导入收藏状态');
+  assertEqual(createItem.migrationPlan.favorite.isFavorite, true, '应该是收藏的');
+  assertEqual(createItem.migrationPlan.timestamps.willKeepCreated, true, '应该保留创建时间');
+  assertEqual(createItem.migrationPlan.timestamps.willKeepUpdated, true, '应该保留更新时间');
+
+  const overwriteItem = audit1.items.find(i => i.title === '已存在笔记')!;
+  assertEqual(overwriteItem.action, 'rename', '冲突策略rename时应该重命名');
+  assert(overwriteItem.existingNote !== undefined, '应该有现有笔记信息');
+  assertEqual(overwriteItem.existingNote!.attachmentCount, 1, '现有笔记有1个附件');
+  assertEqual(overwriteItem.existingNote!.tagCount, 1, '现有笔记有1个标签');
+
+  assert(audit1.warnings.length >= 1, '应该有重名警告');
+  const renameWarning = audit1.warnings.find(w => w.type === 'rename_notice');
+  assert(renameWarning !== undefined, '应该有重命名警告');
+
+  const audit2 = lib.io.auditImportJSON(JSON.stringify(importData), {
+    conflictStrategy: 'overwrite'
+  });
+
+  assertEqual(audit2.summary.toOverwrite, 1, '应该覆盖1条');
+  assertEqual(audit2.summary.toRename, 1, '应该重命名1条');
+  assert(audit2.warnings.some(w => w.type === 'overwrite_warning'), '应该有覆盖警告');
+
+  const audit3 = lib.io.auditRestoreBackup(backup, {
+    conflictStrategy: 'skip'
+  });
+
+  assertEqual(audit3.summary.toSkip, 1, '应该跳过1条');
+  assertEqual(audit3.summary.totalHistoryRecords, 3, '应该有3条历史记录');
+  
+  const historyItem = audit3.items[0];
+  assertEqual(historyItem.migrationPlan.history.willImport, true, '应该导入历史记录');
+  assertEqual(historyItem.migrationPlan.history.visitCount, 2, '应该有2次访问记录');
+
+  const audit4 = lib.io.auditRestoreBackup(backup, {
+    conflictStrategy: 'skip',
+    keepMetadata: false
+  });
+
+  assertEqual(audit4.summary.totalHistoryRecords, 0, 'keepMetadata=false时不导入历史');
+  assert(audit4.warnings.some(w => w.type === 'history_skipped'), '应该有历史跳过警告');
+});
+
+test('48. 大结果分页一致性 - 120篇笔记按标签+标题排序', () => {
+  const lib = new KnowledgeLibrary();
+  const totalNotes = 120;
+  const pageSize = 10;
+
+  for (let i = 1; i <= totalNotes; i++) {
+    const tags = i % 4 === 0 ? ['技术', '重要', '后端'] :
+                 i % 4 === 1 ? ['技术', '前端'] :
+                 i % 4 === 2 ? ['产品', '设计'] : ['运营'];
+    const isFavorite = i % 7 === 0;
+    lib.notes.create({
+      title: `知识库文档${i.toString().padStart(3, '0')}`,
+      content: `这是第${i}篇文档，包含搜索关键词，标签：${tags.join(', ')}`,
+      tags,
+      isFavorite
+    });
+  }
+
+  assertEqual(lib.notes.getCount(), totalNotes, '应该有120篇笔记');
+
+  const expectedCount = Math.floor(totalNotes / 2);
+
+  const allNotes = lib.notes.list();
+  const manualTechCount = allNotes.filter(n => n.tags.some(t => t === '技术')).length;
+  assertEqual(manualTechCount, expectedCount, `手动统计应该有${expectedCount}篇技术笔记`);
+
+  const allTechNotes = lib.search.query({
+    query: '',
+    tagFilters: ['技术'],
+    limit: undefined
+  });
+  assertEqual(allTechNotes.length, expectedCount, `不带query的标签过滤应该有${expectedCount}篇`);
+
+  const allResults = lib.search.query({
+    query: '关键词',
+    tagFilters: ['技术'],
+    sortBy: 'title',
+    sortOrder: 'asc',
+    limit: undefined
+  });
+
+  assertEqual(allResults.length, expectedCount, '技术标签应该有60篇');
+
+  const page1 = lib.search.queryPaginated({
+    query: '关键词',
+    tagFilters: ['技术'],
+    sortBy: 'title',
+    sortOrder: 'asc',
+    limit: pageSize
+  });
+
+  assertEqual(page1.total, expectedCount, '总数应该是60');
+  assertEqual(page1.results.length, pageSize, '第一页应该有10条');
+  assertEqual(page1.hasMore, true, '应该有更多');
+  assertEqual(page1.results[0].note.title, '知识库文档001', '第一条应该是001');
+  assertEqual(page1.results[9].note.title, '知识库文档033', '第十条应该是033');
+
+  const allIds: string[] = [];
+  let currentPage = page1;
+  let pageNum = 1;
+
+  while (currentPage.hasMore) {
+    pageNum++;
+    currentPage.results.forEach(r => allIds.push(r.note.id));
+    
+    const next = lib.search.continueSearch(currentPage.cursor.cacheKey);
+    assert(next !== null, `第${pageNum}页应该能获取`);
+    assertEqual(next!.total, expectedCount, `第${pageNum}页总数应该保持60`);
+    assertEqual(next!.cursor.options.sortBy, 'title', `第${pageNum}页排序应该保持`);
+    assertEqual(next!.cursor.options.sortOrder, 'asc', `第${pageNum}页排序方向应该保持`);
+    assertEqual(next!.cursor.options.tagFilters?.length, 1, `第${pageNum}页标签筛选应该保持`);
+    assertEqual(next!.cursor.options.tagFilters?.[0], '技术', `第${pageNum}页标签值应该保持`);
+    
+    if (pageNum < 6) {
+      assertEqual(next!.results.length, pageSize, `第${pageNum}页应该有${pageSize}条`);
+    } else {
+      assertEqual(next!.results.length, expectedCount % pageSize, `最后一页应该有${expectedCount % pageSize}条`);
+    }
+    
+    currentPage = next!;
+  }
+
+  currentPage.results.forEach(r => allIds.push(r.note.id));
+
+  assertEqual(pageNum, 6, '应该有6页');
+  assertEqual(allIds.length, expectedCount, '所有结果应该是60条');
+  assertEqual(currentPage.hasMore, false, '最后一页应该没有更多');
+
+  const uniqueIds = new Set(allIds);
+  assertEqual(uniqueIds.size, expectedCount, '不应该有重复结果');
+
+  for (let i = 0; i < expectedCount; i++) {
+    assertEqual(allIds[i], allResults[i].note.id, `第${i + 1}条ID应该匹配`);
+  }
+
+  const page1WithFav = lib.search.queryPaginated({
+    query: '关键词',
+    tagFilters: ['技术'],
+    isFavorite: true,
+    sortBy: 'title',
+    sortOrder: 'asc',
+    limit: pageSize
+  });
+
+  const expectedFavCount = Math.floor(totalNotes / 4 / 7 * 2) + 1;
+  assert(page1WithFav.total > 0, '收藏筛选应该有结果');
+  assert(page1WithFav.total < expectedCount, '收藏筛选结果应该少于总数');
+
+  const allFavIds: string[] = [];
+  let currentFavPage = page1WithFav;
+  
+  while (currentFavPage.hasMore) {
+    currentFavPage.results.forEach(r => allFavIds.push(r.note.id));
+    const next = lib.search.continueSearch(currentFavPage.cursor.cacheKey);
+    assert(next !== null, '收藏筛选分页应该能继续');
+    assertEqual(next!.total, page1WithFav.total, '收藏筛选总数应该保持一致');
+    currentFavPage = next!;
+  }
+  currentFavPage.results.forEach(r => allFavIds.push(r.note.id));
+  
+  assertEqual(allFavIds.length, page1WithFav.total, '收藏筛选所有结果数量应该匹配');
+});
+
 console.log(`\n=== 测试结果 ===`);
 console.log(`通过: ${passed}, 失败: ${failed}`);
 

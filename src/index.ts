@@ -22,7 +22,9 @@ import type {
   GraphAnalysis,
   SavedSearchFilter,
   PaginatedSearchResult,
-  EnhancedSearchResult
+  EnhancedSearchResult,
+  SearchWithFacetsResult,
+  ImportAuditReport
 } from './types';
 
 import { NoteManager } from './modules/NoteManager';
@@ -314,7 +316,9 @@ export class KnowledgeLibrary {
 
   search = {
     query: (options: SearchOptions): SearchResult[] => {
-      const limit = options.limit ?? this.config.searchResultLimit;
+      const limit = 'limit' in options && options.limit === undefined 
+        ? undefined 
+        : (options.limit ?? this.config.searchResultLimit);
       return this.searchEngine.search(
         { ...options, limit },
         this.noteManager.getAllNotes()
@@ -322,7 +326,9 @@ export class KnowledgeLibrary {
     },
 
     queryPaginated: (options: SearchOptions): PaginatedSearchResult => {
-      const limit = options.limit ?? this.config.searchResultLimit;
+      const limit = 'limit' in options && options.limit === undefined 
+        ? undefined 
+        : (options.limit ?? this.config.searchResultLimit);
       return this.searchEngine.searchWithPagination(
         { ...options, limit },
         this.noteManager.getAllNotes()
@@ -335,6 +341,16 @@ export class KnowledgeLibrary {
 
     queryEnhanced: (options: SearchOptions): EnhancedSearchResult[] => {
       return this.searchEngine.searchEnhanced(options, this.noteManager.getAllNotes());
+    },
+
+    queryWithFacets: (options: SearchOptions): SearchWithFacetsResult => {
+      const limit = 'limit' in options && options.limit === undefined 
+        ? undefined 
+        : (options.limit ?? this.config.searchResultLimit);
+      return this.searchEngine.searchWithFacets(
+        { ...options, limit },
+        this.noteManager.getAllNotes()
+      );
     },
 
     saveFilter: (name: string, options: SearchOptions): SavedSearchFilter => {
@@ -560,6 +576,33 @@ export class KnowledgeLibrary {
         backup,
         options,
         this.noteManager.getAllNotes()
+      );
+    },
+
+    auditImportJSON: (jsonString: string, options: ImportOptions = {}): ImportAuditReport => {
+      return this.importExportManager.auditImportJSON(
+        jsonString,
+        options,
+        this.noteManager.getAllNotes(),
+        this.historyManager.toJSON()
+      );
+    },
+
+    auditImportMarkdown: (files: { filename: string; content: string }[], options: ImportOptions = {}): ImportAuditReport => {
+      return this.importExportManager.auditImportMarkdown(
+        files,
+        options,
+        this.noteManager.getAllNotes(),
+        this.historyManager.toJSON()
+      );
+    },
+
+    auditRestoreBackup: (backup: BackupPackage, options: ImportOptions = {}): ImportAuditReport => {
+      return this.importExportManager.auditRestoreBackup(
+        backup,
+        options,
+        this.noteManager.getAllNotes(),
+        this.historyManager.toJSON()
       );
     },
 
